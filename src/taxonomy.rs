@@ -14,6 +14,7 @@ use std::process;
 use std::str::FromStr;
 
 const FILE_MAGIC: &str = "K2TAXDAT";
+
 #[derive(Debug, Default)]
 pub struct NCBITaxonomy {
     parent_map_: HashMap<usize, usize>,
@@ -23,9 +24,189 @@ pub struct NCBITaxonomy {
     marked_nodes_: HashSet<usize>,
     known_ranks_: HashSet<String>,
 }
+impl NCBITaxonomy {
+    pub fn new(&mut self, nodes_filename: &str, names_filename: &str) -> Self {
+        const DELIM: &str = "\t|\t";
+        // Open nodes and names
+        let nodes_file = get_bufreader(nodes_filename);
+        let names_file = get_bufreader(names_filename);
 
-#[derive(Clone, Debu)]
-struct Taxonomy {
+        // todo: delete these
+        let line: String;
+        let (mut node_id, mut parent_id): (usize, usize) = (0, 0);
+        let mut rank = String::new();
+        let mut name = String::new();
+        let mut junk = String::new();
+
+        let mut lines = nodes_file.lines();
+        while let Some(line) = lines.next() {
+            let mut line = line.unwrap();
+            line.pop(); // discard trailing
+            line.pop(); //   "\t|"
+            let mut pos1 = 0usize;
+            let mut field_ct = 0i64;
+            let mut finished = false;
+            let mut token;
+            while field_ct < 10 && !finished {
+                field_ct += 1;
+                match line.find(DELIM) {
+                    Some(pos2) => {
+                        token = line.get(pos1..(pos2 - pos1));
+                        pos1 = pos2 + DELIM.len();
+                    }
+                    None => {
+                        token = line.get(pos1..);
+                        finished = true;
+                    }
+                }
+
+                match field_ct {
+                    // 1-based counting
+                    1 => {
+                        node_id = token.unwrap().parse::<usize>().unwrap();
+                        if node_id == 0 {
+                            panic!("Attempt to create taxonomy with node ID == 0")
+                        }
+                    }
+                    2 => parent_id = token.unwrap().parse::<usize>().unwrap(),
+                    3 => {
+                        let rank = token.unwrap().to_owned();
+                        finished = true;
+                    }
+                    _ => {}
+                }
+                if node_id == 1 {
+                    parent_id = 0;
+                }
+
+                self.parent_map_.insert(node_id, parent_id);
+                self.child_map_
+                    .entry(parent_id)
+                    .or_insert_with(HashSet::new)
+                    .insert(node_id);
+                self.rank_map_.insert(node_id, rank.to_owned());
+                self.known_ranks_.insert(rank.to_string());
+            }
+        }
+
+        let mut lines = names_file.lines();
+        while let Some(line) = lines.next() {
+            let mut line = line.unwrap();
+
+            line.pop(); // discard trailing
+            line.pop(); //   "\t|"
+
+            let mut pos1 = 0usize;
+            let mut field_ct = 0;
+            let mut finished = false;
+            let mut token: Option<&str> = None;
+            while field_ct < 10 && !finished {
+                field_ct += 1;
+                let name = name.clone();
+                // Rest of the code...
+            }
+            match line.find(DELIM) {
+                Some(pos2) => {
+                    token = Some(&line[pos1..pos2]);
+                    pos1 = pos2 + DELIM.len();
+                }
+                None => {
+                    token = Some(&line);
+                    finished = true;
+                }
+            }
+            match field_ct {
+                // 1-based counting
+                // ...
+                1 => {
+                    node_id = token.unwrap().parse::<usize>().unwrap();
+                    if node_id == 0 {
+                        panic!("Attempt to create taxonomy with node ID == 0")
+                    }
+                }
+                2 => {
+                    name = token.unwrap().to_owned();
+                }
+                4 => {
+                    if token == Some("scientific name") {
+                        self.name_map_.insert(node_id, name);
+                    }
+                    finished = true
+                }
+                // Remove the closing curly brace and the empty block
+                _ => todo!(),
+            }
+        }
+        self.marked_nodes_.insert(1);
+        *self
+    }
+
+    pub fn mark_node(mut self, mut taxid: usize) -> Self {
+        while !self.marked_nodes_.contains(&taxid) {
+            self.marked_nodes_.insert(taxid);
+            taxid = self.parent_map_[&taxid]
+        }
+        self
+    }
+
+    fn convert_to_kraken_taxonomy(&self, filename: &str) {
+        let mut taxo = Taxonomy::default();
+        let zeroes_node = TaxonomyNode::default().clone();
+
+        taxo.node_count_ = self.marked_nodes_.len() + 1; // +1 because 0 is illegal
+        taxo.nodes_ = vec![TaxonomyNode::default(); taxo.node_count_];
+        let mut name_data: String;
+        let mut rank_data: String;
+
+        // Because so many of the node rank names are shared, we only store one copy of each rank
+        let mut rank_offsets: HashMap<String, usize> = HashMap::new();
+        let mut internal_node_id = 0;
+        let mut external_id_map: HashMap<usize, usize> = HashMap::new();
+        external_id_map.insert(0, 0);
+        external_id_map.insert(1, 1); // 1 is root in both NCBI and Kraken taxonomies
+
+        // Breadth-first search (BFS) through NCBI taxonomy, assigning internal IDs
+        // In sequential order as nodes are encountered via BFS.
+        let mut bfs_queue: VecDeque<usize> = VecDeque::new();
+        bfs_queue.push_back(1);
+        let mut node = zeroes_node; // Move the initialization of `node` outside of the loop
+        while !bfs_queue.is_empty() {
+            let mut node = zeroes_node.clone();
+            internal_node_id += 1;
+            let external_node_id = bfs_queue.front().unwrap().clone(); // Clone the Option<&usize> value
+            bfs_queue.pop_back();
+            external_id_map.insert(external_node_id, internal_node_id); // Remove the dereference operator (*)
+
+            //todo: Probably could just be initialized
+            let mut node = zeroes_node;
+            node.parent_id = external_id_map[&self.parent_map_[&external_node_id]];
+            node.external_id = external_node_id;
+            node.rank_offset = rank_offsets[&self.rank_map_[&external_node_id]];
+            node.name_offset = name_data.len();
+            node.first_child = internal_node_id + 1 + bfs_queue.len();
+            for child_node in &self.child_map_[&external_node_id] {
+                if self.marked_nodes_.contains(child_node) {
+                    bfs_queue.push_back(*child_node);
+                    node.child_count += 1;
+                }
+            }
+            taxo.nodes_[internal_node_id] = node;
+            let name: &String = &self.name_map_[&external_node_id];
+            name_data.push_str(&name)
+        } // end BFS while loop
+
+        taxo.rank_data_ = rank_data;
+        taxo.rank_data_len_ = rank_data.len();
+
+        taxo.name_data_ = name_data;
+        taxo.name_data_len_ = name_data.len();
+
+        taxo.write_to_disk(filename);
+    }
+}
+
+#[derive(Clone)]
+pub struct Taxonomy {
     nodes_: Vec<TaxonomyNode>,
     node_count_: usize,
     name_data_: String,
@@ -41,7 +222,6 @@ impl Default for Taxonomy {
         }
     }
 }
-
 impl Taxonomy {
     fn init(&mut self, filename: &str, memory_mapping: bool) -> Result<(), std::io::Error> {
         if memory_mapping {
@@ -147,7 +327,7 @@ impl Taxonomy {
     }
 }
 
-struct TaxonomyNode {
+pub struct TaxonomyNode {
     parent_id: usize,
     first_child: usize,
     child_count: usize,
@@ -182,176 +362,6 @@ impl Clone for TaxonomyNode {
         }
     }
 }
-
-impl NCBITaxonomy {
-    pub fn new(&self, nodes_filename: &str, names_filename: &str) -> Self {
-        // Open nodes and names
-        let nodes_file = get_bufreader(nodes_filename);
-        let names_file = get_bufreader(names_filename);
-
-        // todo: delete these
-        let line: String;
-        let (mut node_id, mut parent_id): (usize, usize);
-        let (mut name, mut rank, junk): (String, String, String);
-        const DELIM: &str = "\t|\t";
-
-        while let Some(line) = nodes_file.lines().next() {
-            let mut line = line.unwrap();
-            line.pop(); // discard trailing
-            line.pop(); //   "\t|"
-            let mut pos1 = 0usize;
-            let mut field_ct: i64 = 0;
-            let mut finished = false;
-            let mut token;
-            while field_ct < 10 && !finished {
-                field_ct += 1;
-                let pos2 = line.find(DELIM);
-                if pos2 == None {
-                    token = line.get(pos1..);
-                    finished = true
-                } else {
-                    token = line.get(pos1..(pos2.unwrap() - pos1));
-                    pos1 = pos2.unwrap() + DELIM.len();
-                }
-
-                match field_ct {
-                    // 1-based counting
-                    1 => {
-                        node_id = token.unwrap().parse::<usize>().unwrap();
-                        if node_id == 0 {
-                            panic!("Attempt to create taxonomy with node ID == 0")
-                        }
-                    }
-                    2 => parent_id = token.unwrap().parse::<usize>().unwrap(),
-                    3 => {
-                        rank = token.unwrap().to_owned();
-                        finished = true;
-                    }
-                    _ => {}
-                }
-                if node_id == 1 {
-                    parent_id = 0;
-                }
-
-                self.parent_map_.insert(node_id, parent_id);
-                self.child_map_
-                    .entry(parent_id)
-                    .or_insert_with(HashSet::new)
-                    .insert(node_id);
-                self.rank_map_.insert(node_id, rank);
-                self.known_ranks_.insert(rank);
-            }
-        }
-
-        while let Some(line) = names_file.lines().next() {
-            let mut line = line.unwrap();
-            line.pop(); // discard trailing
-            line.pop(); //   "\t|"
-            let mut pos1 = 0usize;
-            let mut field_ct = 0i64;
-            let mut finished = false;
-            let mut token;
-            ////
-            while field_ct < 10 && !finished {
-                let pos2 = line.find(DELIM);
-                // let token: String;
-                if pos2 == None {
-                    token = line.get(pos1..);
-                    finished = true
-                } else {
-                    token = line.get(pos1..(pos2.unwrap() - pos1));
-                    pos1 = pos2.unwrap() + DELIM.len();
-                }
-                match field_ct {
-                    // 1-based counting
-                    // ...
-                    1 => {
-                        node_id = token.unwrap().parse::<usize>().unwrap();
-                        if node_id == 0 {
-                            panic!("Attempt to create taxonomy with node ID == 0")
-                        }
-                    }
-                    2 => name = token.unwrap().to_owned(),
-                    4 => {
-                        if token == Some("scientific name") {
-                            self.name_map_.insert(node_id, name);
-                        }
-                        finished = true
-                    }
-                    _ => {}
-                }
-            }
-        }
-        self.marked_nodes_.insert(1);
-        *self
-    }
-
-    pub fn mark_node(&self, mut taxid: usize) {
-        while !self.marked_nodes_.contains(&taxid) {
-            self.marked_nodes_.insert(taxid);
-            taxid = self.parent_map_[&taxid]
-        }
-    }
-
-    fn convert_to_kraken_taxonomy(&self, filename: &str) {
-        let mut taxo = Taxonomy::default();
-        let zeroes_node = TaxonomyNode::default();
-
-        taxo.node_count_ = self.marked_nodes_.len() + 1; // +1 because 0 is illegal
-        taxo.nodes_ = vec![TaxonomyNode::default(); taxo.node_count_];
-        let mut name_data: String;
-        let mut rank_data: String;
-
-        // Because so many of the node rank names are shared, we only store one copy of each rank
-        let mut rank_offsets: HashMap<String, usize> = HashMap::new();
-        for rank in self.known_ranks_ {
-            rank_offsets.insert(rank, rank_data.len());
-            rank_data.push_str(&rank);
-            rank_data.push('\0');
-        }
-        let mut internal_node_id = 0;
-        let mut external_id_map: HashMap<usize, usize> = HashMap::new();
-        external_id_map[&0] = 0;
-        external_id_map[&1] = 1; // 1 is root in both NCBI and Kraken taxonomies
-
-        // Breadth-first search (BFS) through NCBI taxonomy, assigning internal IDs
-        // In sequential order as nodes are encountered via BFS.
-        let mut bfs_queue: VecDeque<usize>;
-        bfs_queue.push_back(1);
-        while !bfs_queue.is_empty() {
-            internal_node_id += 1;
-            let external_node_id = bfs_queue.front().unwrap(); // Unwrap the Option<&usize> value
-            bfs_queue.pop_back();
-            external_id_map.insert(*external_node_id, internal_node_id); // Fix: Dereference external_node_id
-
-            //todo: Probably could just be initialized
-            let mut node = zeroes_node;
-            node.parent_id = external_id_map[&self.parent_map_[external_node_id]]; // Fix: Dereference external_node_id
-            node.external_id = *external_node_id; // Fix: Dereference external_node_id
-            node.rank_offset = rank_offsets[&self.rank_map_[external_node_id]]; // Fix: Dereference external_node_id
-            node.name_offset = name_data.len();
-            node.first_child = internal_node_id + 1 + bfs_queue.len();
-            for child_node in self.child_map_[external_node_id] {
-                if self.marked_nodes_.contains(&child_node) {
-                    bfs_queue.push_back(child_node);
-                    node.child_count += 1
-                }
-            }
-            taxo.nodes_[internal_node_id] = node;
-            let name: String = self.name_map_[external_node_id];
-            name_data.push_str(&name)
-        } // end BFS while loop
-
-        taxo.rank_data_ = rank_data;
-        taxo.rank_data_len_ = rank_data.len();
-
-        taxo.name_data_ = name_data;
-        taxo.name_data_len_ = name_data.len();
-
-        taxo.write_to_disk(filename);
-    }
-}
-
 fn get_bufreader(filename: &str) -> BufReader<File> {
     match File::open(filename) {
         Ok(file) => BufReader::new(file),
