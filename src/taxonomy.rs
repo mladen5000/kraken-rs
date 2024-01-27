@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 const FILE_MAGIC: &str = "K2TAXDAT";
 #[derive(Debug, Default)]
-struct NCBITaxonomy {
+pub struct NCBITaxonomy {
     parent_map_: HashMap<usize, usize>,
     name_map_: HashMap<usize, String>,
     rank_map_: HashMap<usize, String>,
@@ -24,6 +24,7 @@ struct NCBITaxonomy {
     known_ranks_: HashSet<String>,
 }
 
+#[derive(Clone, Debu)]
 struct Taxonomy {
     nodes_: Vec<TaxonomyNode>,
     node_count_: usize,
@@ -183,7 +184,7 @@ impl Clone for TaxonomyNode {
 }
 
 impl NCBITaxonomy {
-    fn new(&self, nodes_filename: &str, names_filename: &str) -> Self {
+    pub fn new(&self, nodes_filename: &str, names_filename: &str) -> Self {
         // Open nodes and names
         let nodes_file = get_bufreader(nodes_filename);
         let names_file = get_bufreader(names_filename);
@@ -285,7 +286,7 @@ impl NCBITaxonomy {
         *self
     }
 
-    fn mark_node(&self, mut taxid: usize) {
+    pub fn mark_node(&self, mut taxid: usize) {
         while !self.marked_nodes_.contains(&taxid) {
             self.marked_nodes_.insert(taxid);
             taxid = self.parent_map_[&taxid]
