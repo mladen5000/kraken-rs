@@ -99,3 +99,19 @@ fn main() {
         println!("Frame {}: {}", i + 1, frame);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_translate_to_all_frames() {
+        let dna_seq = "AGCTAGCTAGCT";
+        let translated_frames = translate_to_all_frames(dna_seq);
+        println!("{translated_frames:?}");
+        assert_eq!(translated_frames.len(), 6);
+        // Example check for specific frame translation (can be expanded for more detailed tests)
+        assert_eq!(translated_frames[0], "SSS");
+        assert_eq!(translated_frames[5], "LCL");
+    }
+}
