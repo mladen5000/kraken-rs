@@ -149,7 +149,7 @@ impl NCBITaxonomy {
         self
     }
 
-    fn convert_to_kraken_taxonomy(&self, filename: &str) {
+    pub fn convert_to_kraken_taxonomy(&self, filename: &str) {
         let mut taxo = Taxonomy::default();
         let zeroes_node = TaxonomyNode::default().clone();
 
@@ -215,15 +215,15 @@ pub struct Taxonomy {
     rank_data_len_: usize,
     external_to_internal_id_map_: HashMap<usize, usize>,
 }
-impl Default for Taxonomy {
+pub impl Default for Taxonomy {
     fn default() -> Self {
         Taxonomy {
             ..Default::default()
         }
     }
 }
-impl Taxonomy {
-    fn init(&mut self, filename: &str, memory_mapping: bool) -> Result<(), std::io::Error> {
+pub impl Taxonomy {
+    pub fn init(&mut self, filename: &str, memory_mapping: bool) -> Result<(), std::io::Error> {
         if memory_mapping {
             // Memory mapping is not directly supported in Rust's standard library.
             // You would need to use a crate like memmap.
@@ -266,9 +266,22 @@ impl Taxonomy {
         }
         Ok(())
     }
+
+    pub fn name_data(&self) -> &String {
+        &self.name_data_
+    }
+    pub fn rank_data(&self) -> &String {
+        &self.rank_data_
+    }
+    pub fn node_count(&self) -> usize {
+        self.node_count_
+    }
+    pub fn nodes(&self) -> &Vec<TaxonomyNode> {
+        &self.nodes_
+    }
     /// Logic here depends on higher nodes having smaller IDs
     /// Idea: advance B tracker up tree, A is ancestor iff B tracker hits A
-    fn is_a_ancestor_of_b(&self, mut a: usize, mut b: usize) -> bool {
+    pub fn is_a_ancestor_of_b(&self, mut a: usize, mut b: usize) -> bool {
         if a == 0 || b == 0 {
             return false;
         }
@@ -279,7 +292,7 @@ impl Taxonomy {
     }
     /// Logic here depends on higher nodes having smaller IDs
     /// Idea: track two nodes, advance lower tracker up tree, trackers meet @ LCA
-    fn lowest_common_ancestor(&self, mut a: usize, mut b: usize) -> usize {
+    pub fn lowest_common_ancestor(&self, mut a: usize, mut b: usize) -> usize {
         if a == 0 || b == 0 {
             return if a != 0 { a } else { b };
         }
@@ -293,7 +306,7 @@ impl Taxonomy {
         a
     }
 
-    fn write_to_disk(&self, filename: &str) {
+    pub fn write_to_disk(&self, filename: &str) {
         let mut taxo_file = File::create(filename).expect("Unable to create file");
         taxo_file
             .write_all(FILE_MAGIC.as_bytes())
@@ -328,13 +341,20 @@ impl Taxonomy {
 }
 
 pub struct TaxonomyNode {
-    parent_id: usize,
-    first_child: usize,
-    child_count: usize,
-    name_offset: usize,
-    rank_offset: usize,
-    external_id: usize,
-    godparent_id: usize,
+    /// Must be lower-numbered node
+    pub parent_id: u64,
+    /// Must be higher-numbered node
+    pub first_child: u64,
+    /// Children of a node are in contiguous block
+    pub child_count: u64,
+    /// Location of name in name data super-string
+    pub name_offset: u64,
+    /// Location of rank in rank data super-string
+    pub rank_offset: u64,
+    /// Taxonomy ID for reporting purposes (usually NCBI)
+    pub external_id: u64,
+    /// Reserved for future use to enable faster traversal
+    pub godparent_id: u64,
 }
 impl Default for TaxonomyNode {
     fn default() -> Self {
