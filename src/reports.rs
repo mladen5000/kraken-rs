@@ -236,7 +236,7 @@ fn print_kraken_style_report_line<W: Write>(
         );
     }
     write!(writer, "{rank_str}\t{taxid}\t");
-    for i in (0..depth) {
+    for i in 0..depth {
         write!(writer, " ");
     }
     write!(writer, "{sci_name}");
