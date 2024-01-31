@@ -140,7 +140,6 @@ impl NCBITaxonomy {
         self.marked_nodes_.insert(1);
         *self
     }
-
     pub fn mark_node(mut self, mut taxid: usize) -> Self {
         while !self.marked_nodes_.contains(&taxid) {
             self.marked_nodes_.insert(taxid);
@@ -148,7 +147,6 @@ impl NCBITaxonomy {
         }
         self
     }
-
     pub fn convert_to_kraken_taxonomy(&self, filename: &str) {
         let mut taxo = Taxonomy::default();
         let zeroes_node = TaxonomyNode::default().clone();
@@ -215,14 +213,14 @@ pub struct Taxonomy {
     rank_data_len_: usize,
     external_to_internal_id_map_: HashMap<usize, usize>,
 }
-pub impl Default for Taxonomy {
+impl Default for Taxonomy {
     fn default() -> Self {
         Taxonomy {
             ..Default::default()
         }
     }
 }
-pub impl Taxonomy {
+impl Taxonomy {
     pub fn init(&mut self, filename: &str, memory_mapping: bool) -> Result<(), std::io::Error> {
         if memory_mapping {
             // Memory mapping is not directly supported in Rust's standard library.
@@ -266,7 +264,6 @@ pub impl Taxonomy {
         }
         Ok(())
     }
-
     pub fn name_data(&self) -> &String {
         &self.name_data_
     }
@@ -279,9 +276,8 @@ pub impl Taxonomy {
     pub fn nodes(&self) -> &Vec<TaxonomyNode> {
         &self.nodes_
     }
-    /// Logic here depends on higher nodes having smaller IDs
-    /// Idea: advance B tracker up tree, A is ancestor iff B tracker hits A
     pub fn is_a_ancestor_of_b(&self, mut a: usize, mut b: usize) -> bool {
+        // Idea: advance B tracker up tree, A is ancestor iff B tracker hits A
         if a == 0 || b == 0 {
             return false;
         }
@@ -290,9 +286,9 @@ pub impl Taxonomy {
         }
         b == a
     }
-    /// Logic here depends on higher nodes having smaller IDs
-    /// Idea: track two nodes, advance lower tracker up tree, trackers meet @ LCA
     pub fn lowest_common_ancestor(&self, mut a: usize, mut b: usize) -> usize {
+        // Logic here depends on higher nodes having smaller IDs
+        // Idea: track two nodes, advance lower tracker up tree, trackers meet @ LCA
         if a == 0 || b == 0 {
             return if a != 0 { a } else { b };
         }
@@ -305,7 +301,6 @@ pub impl Taxonomy {
         }
         a
     }
-
     pub fn write_to_disk(&self, filename: &str) {
         let mut taxo_file = File::create(filename).expect("Unable to create file");
         taxo_file
@@ -382,7 +377,8 @@ impl Clone for TaxonomyNode {
         }
     }
 }
-fn get_bufreader(filename: &str) -> BufReader<File> {
+
+pub fn get_bufreader(filename: &str) -> BufReader<File> {
     match File::open(filename) {
         Ok(file) => BufReader::new(file),
         Err(_) => {

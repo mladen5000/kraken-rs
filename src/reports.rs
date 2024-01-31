@@ -36,6 +36,15 @@ impl<T> ReadCounts<T> {
             kmers,
         }
     }
+    fn increment_read_counts(&mut self) {
+        self.n_reads += 1;
+    }
+    fn kmer_counts(&mut self) -> u64 {
+        self.n_kmers
+    }
+    fn distinct_kmer_counts(&mut self) {
+        unimplemented!()
+    }
 }
 
 impl<T> ReadCounts<T> {
@@ -154,7 +163,7 @@ fn mpa_report_dfs<W: Write>(
     if child_count != 0 {
         let mut children = child_count;
     }
-    for i in (0..child_count) {
+    for i in 0..child_count {
         children.insert(i as usize, node.first_child + i)
     }
     children.sort_by(|&a, &b| clade_counts.0[&b].cmp(&clade_counts.0[&a]));
