@@ -40,7 +40,7 @@ fn build_lookup_tables() {
 /// # Returns
 ///
 /// A vector containing amino acid sequences for each of the six reading frames.
-fn translate_to_all_frames(dna_seq: &str) -> Vec<String> {
+pub fn translate_to_all_frames(dna_seq: &str) -> Vec<String> {
     let max_size = (dna_seq.len() / 3) + 1;
     let mut aa_seqs = vec![String::with_capacity(max_size); 6];
     if dna_seq.len() < 3 {

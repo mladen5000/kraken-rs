@@ -1,5 +1,19 @@
+use crate::aa_translate::translate_to_all_frames;
+// use crate::build_db::TaxId;
+use crate::compact_hash::CompactHashTable;
+use crate::kraken2_data::IndexOptions;
+use crate::kraken2_data::TaxId;
+use crate::kraken2_data::TAXID_MAX;
+use crate::kv_store;
+use crate::kv_store::*;
+use crate::reports;
+use crate::reports::{TaxonCounters, TaxonCounts};
+use num_cpus;
+use std::process;
+
 use crate::seqreader::{Sequence, SequenceFormat};
-use std::collections::BinaryHeap;
+use crate::taxonomy::*;
+use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::fs::File;
 use std::io::{self, Write};
@@ -143,7 +157,7 @@ fn main() {
 
     if !opts.report_filename.is_empty() {
         if opts.mpa_style_report {
-            report_mpa_style(
+            reports::report_mpa_style(
                 &opts.report_filename,
                 opts.report_zero_counts,
                 &mut taxonomy,
@@ -151,7 +165,7 @@ fn main() {
             );
         } else {
             let total_unclassified = stats.total_sequences - stats.total_classified;
-            report_kraken_style(
+            reports::report_kraken_style(
                 &opts.report_filename,
                 opts.report_zero_counts,
                 opts.report_kmer_data,
@@ -214,7 +228,7 @@ fn process_files(
     let output_queue: Arc<Mutex<BinaryHeap<OutputData>>> = Arc::new(Mutex::new(BinaryHeap::new()));
 
     let threads: Vec<_> = (0..num_cpus::get())
-        .map(|_| {
+        .map({
             let queue_clone = Arc::clone(&output_queue);
             let fptr1_clone = fptr1.clone();
             let fptr2_clone = fptr2.clone();
@@ -313,15 +327,15 @@ fn process_files(
                         if let Some(call) = call {
                             let buffer = format!(" kraken:taxid|{}", tax.nodes()[call].external_id);
                             seq1.header.push_str(&buffer);
-                            write!(&mut c1_oss, "{}", seq1.to_string()).unwrap();
+                            write!(&mut c1_oss, "{}", format!("{}", seq1)).unwrap();
                             if let Some(mut seq2) = seq2 {
                                 seq2.header.push_str(&buffer);
-                                write!(&mut c2_oss, "{}", seq2.to_string()).unwrap();
+                                write!(&mut c2_oss, "{}", format!("{}", seq2)).unwrap();
                             }
                         } else {
-                            write!(&mut u1_oss, "{}", seq1.to_string()).unwrap();
+                            write!(&mut u1_oss, "{}", format!("{}", seq1)).unwrap();
                             if let Some(seq2) = seq2 {
-                                write!(&mut u2_oss, "{}", seq2.to_string()).unwrap();
+                                write!(&mut u2_oss, "{}", format!("{}", seq2)).unwrap();
                             }
                         }
                         thread_stats.total_bases += seq1.seq.len();
@@ -430,7 +444,7 @@ fn resolve_tree(
     taxonomy: &Taxonomy,
     total_minimizers: usize,
     opts: &Options,
-) -> Taxid {
+) -> TaxId {
     let mut max_taxon = 0;
     let mut max_score = 0;
     let required_score = (opts.confidence_threshold * total_minimizers as f32).ceil() as u32;
@@ -493,11 +507,11 @@ fn classify_sequence(
     opts: &Options,
     stats: &mut ClassificationStats,
     scanner: &mut MinimizerScanner,
-    taxa: &mut Vec,
+    taxa: &mut Vec<_>,
     hit_counts: &mut TaxonCounts,
-    tx_frames: &mut Vec,
+    tx_frames: &mut Vec<_>,
     curr_taxon_counts: &mut TaxonCounters,
-) -> Taxid {
+) -> TaxId {
     let mut call = 0;
     taxa.clear();
     hit_counts.clear();
@@ -531,7 +545,7 @@ fn classify_sequence(
                         if let Some(minimum_acceptable_hash_value) =
                             idx_opts.minimum_acceptable_hash_value
                         {
-                            if murmur_hash3(minimizer) < minimum_acceptable_hash_value {
+                            if kv_store::murmurhash3(minimizer) < minimum_acceptable_hash_value {
                                 skip_lookup = true;
                             }
                         }
@@ -655,7 +669,7 @@ fn classify_sequence(
     call
 }
 
-fn add_hitlist_string(oss: &mut String, taxa: &Vec<Taxid>, taxonomy: &Taxonomy) {
+fn add_hitlist_string(oss: &mut String, taxa: &Vec<TaxId>, taxonomy: &Taxonomy) {
     let mut last_code = taxa[0];
     let mut code_count = 1;
 

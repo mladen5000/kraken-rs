@@ -1,7 +1,10 @@
 pub mod aa_translate;
 pub mod build_db;
 pub mod classify;
-mod hyperloglogplus;
+pub mod compact_hash;
+mod estimate_capacity;
+pub mod hyperloglogplus;
+pub mod kraken2_data;
 pub mod kv_store;
 pub mod reports;
 pub mod seqreader;

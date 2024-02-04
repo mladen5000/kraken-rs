@@ -27,7 +27,7 @@ struct Options {
     deterministic_build: bool,
 }
 
-type TaxidT = usize;
+pub type TaxidT = usize;
 
 fn read_id_to_taxon_map(id_map: &mut HashMap<String, TaxidT>, filename: &str) {
     let file = match File::open(filename) {

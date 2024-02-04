@@ -37,7 +37,7 @@ fn extract_bits<T: Copy + From<u8> + Shl<Output = T> + BitAnd<Output = T>>(
 }
 
 // HyperLogLogPlusMinus data structure
-struct HyperLogLogPlusMinus {
+pub struct HyperLogLogPlusMinus {
     p: u8,
     m: usize,
     // bit_mixer: fn(u64) -> u64,
@@ -58,7 +58,7 @@ impl<T> HyperLogLogPlusMinus<T> {
             registers: vec![0; 1 << precision],
             sparse_list: HashSet::new(),
             hash_function: hash_functions::wang_mixer,
-            use_n_observed = true,
+            use_n_observed: true,
             // bit_mixer: Some(default_hash_function),
         }
     }
@@ -88,23 +88,19 @@ impl<T> HyperLogLogPlusMinus<T> {
             let sparse = other.sparse;
             let sparselist = other.sparselist;
             self.M = other.M.clone();
-        }
-        else {
+        } else {
             let n_observed = self.n_observed + other.n_observed();
             if self.sparse && other.sparse {
                 self.sparse_list.extend(other.sparse_list.iter());
-            }
-            else if other.sparse {
+            } else if other.sparse {
                 self.add_to_registers(other.sparse_list);
-            }
-            else {
+            } else {
                 if self.sparse {
                     self.sparse = false;
                     self.M = other.M;
                     self.add_to_registers(self.sparse_list);
                     self.sparse_list.clear()
-                }
-                else {
+                } else {
                     //merge registers
                     for i in 0..M.size() {
                         if other.M[i] > self.M[i] {
@@ -115,12 +111,12 @@ impl<T> HyperLogLogPlusMinus<T> {
             }
         }
     }
-    fn cardinality(&self) -> u64 { /* Implementation here */
+    fn cardinality(&self) -> u64 {
+        /* Implementation here */
         ertl_cardinality();
-
     }
 
-    fn flajolet_cardinality(self,use_sparse_precision: bool) -> () {
+    fn flajolet_cardinality(self, use_sparse_precision: bool) -> () {
         M = vec![0; self.m];
         if use_sparse_precision {
             return linear_counting(self.m_prime, self.m_prime - self.sparse_list.len());
@@ -244,9 +240,6 @@ impl<T> HyperLogLogPlusMinus<T> {
         self.cardinality()
     }
 
-
-
-        
     fn switch_to_normal_representation(&mut self) {
         if !self.sparse {
             return;
@@ -274,7 +267,7 @@ impl<T> HyperLogLogPlusMinus<T> {
             }
         }
     }
-// Additional methods as needed
+    // Additional methods as needed
 }
 
 // Methods for sparse representation, bias correction, and improved estimators
@@ -359,21 +352,6 @@ pub mod hash_functions {
 }
 
 // Reporting functionality
-mod reports {
-    use super::HyperLogLogPlusMinus;
-
-    fn print_mpa_style_report_line<W: Write>(
-        writer: &mut W,
-        clade_count: u64,
-        taxonomy_line: &str,
-    ) { /* Implementation here */
-    }
-    fn mpa_report_dfs<W: Write>(/* Parameters here */) { /* Implementation here */
-    }
-    fn report_mpa_style<W: Write>(/* Parameters here */) { /* Implementation here */
-    }
-    // Additional reporting functions as needed
-}
 
 // Define a struct for HyperLogLogPlusMinus
 impl HyperLogLogPlusMinus {

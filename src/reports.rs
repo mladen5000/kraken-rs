@@ -13,7 +13,7 @@ enum SequenceFormat {
 
 type SparseListType = HashSet<u64>;
 
-struct HyperLogLogPlusMinus {
+pub struct HyperLogLogPlusMinus {
     p: u8,
     m: u8,
     M: Vec<u8>,
@@ -23,7 +23,7 @@ struct HyperLogLogPlusMinus {
     bit_mixera: u64,
 }
 
-struct ReadCounts<T> {
+pub struct ReadCounts<T> {
     n_reads: u64,
     n_kmers: u64,
     kmers: T, // distinct kmer count per taxon,
@@ -64,9 +64,9 @@ impl<T> ReadCounts<T> {
 
 type ReadCounter = ReadCounts<HyperLogLogPlusMinus>;
 
-struct TaxonCounts(HashMap<u64, u64>); // Map of taxon ID to count
-struct TaxonCounters(HashMap<u64, ReadCounter>); // Map of taxon ID to ReadCounter
-                                                 // type TaxonCounters = HashMap<u64, ReadCounter>; // Map of taxon ID to ReadCounter
+pub struct TaxonCounts(HashMap<u64, u64>); // Map of taxon ID to count
+pub struct TaxonCounters(HashMap<u64, ReadCounter>); // Map of taxon ID to ReadCounter
+                                                     // type TaxonCounters = HashMap<u64, ReadCounter>; // Map of taxon ID to ReadCounter
 
 // Functions
 fn get_clade_counts(tax: &Taxonomy, call_counts: &TaxonCounts) -> TaxonCounts {
@@ -107,7 +107,7 @@ fn get_clade_counters(tax: &Taxonomy, call_counters: &TaxonCounters) -> TaxonCou
     clade_counters
 }
 
-fn print_mpa_style_report_line<W: std::io::Write>(
+pub fn print_mpa_style_report_line<W: std::io::Write>(
     writer: &mut W,
     clade_count: u64,
     taxonomy_line: &str,
@@ -115,7 +115,7 @@ fn print_mpa_style_report_line<W: std::io::Write>(
     write!(writer, "{}\t{}", taxonomy_line, clade_count);
 }
 
-fn mpa_report_dfs<W: Write>(
+pub fn mpa_report_dfs<W: Write>(
     taxid: usize,
     writer: &mut W,
     report_zeros: bool,
@@ -186,7 +186,7 @@ fn mpa_report_dfs<W: Write>(
     // Implementation
 }
 
-fn report_mpa_style<W: Write>(
+pub fn report_mpa_style<W: Write>(
     writer: &mut W,
     report_zeros: bool,
     taxonomy: &Taxonomy,
@@ -200,7 +200,7 @@ fn report_mpa_style<W: Write>(
     // Implementation
 }
 
-fn print_kraken_style_report_line<W: Write>(
+pub fn print_kraken_style_report_line<W: Write>(
     writer: &mut W,
     report_kmer_data: bool,
     total_seqs: u64,
@@ -324,7 +324,7 @@ fn kraken_report_dfs<W: Write>(
     );
 }
 
-fn report_kraken_style<W: Write>(
+pub fn report_kraken_style<W: Write>(
     writer: &mut W,
     report_zeros: bool,
     report_kmer_data: bool,
@@ -381,6 +381,7 @@ fn report_kraken_style<W: Write>(
     )
 }
 
+// Additional reporting functions as needed
 // Unit Tests
 #[cfg(test)]
 mod tests {
