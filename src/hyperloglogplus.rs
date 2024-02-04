@@ -119,7 +119,133 @@ impl<T> HyperLogLogPlusMinus<T> {
 
     }
 
-    fn ertl_cardinality(){
+    fn flajolet_cardinality(use_sparse_precision: bool) -> () {
+        M = vec![0; self.m];
+        if use_sparse_precision {
+            return linear_counting(self.m_prime, self.m_prime - self.sparse_list.len());
+        } else {
+            // for testing purposes
+            M = vec![0; self.m];
+            for val in self.sparse_list {
+                let idx = get_index(val, self.p);
+                assert!(idx < self.m.len());
+                let rank_val = get_encoded_rank(val, self.p_prime, self.p);
+                if rank_val > self.M[idx] {
+                    self.M[idx] = rank_val;
+                }
+            }
+        }
+        let est = calculate_raw_estimate(M);
+        if est <= self.m * 2.5 {
+            let v = count_zeros(M);
+            if v > 0 {
+                est = linear_counting(m, v);
+            }
+        }
+        if self.use_n_observed && self.n_observed < est {
+            self.n_observed as u64
+        } else {
+            est.round() as u64
+        }
+    }
+
+    fn ertl_cardinality() -> u64 {
+        let (q, m): (usize, usize);
+        let C = vec![];
+
+        if self.sparse {
+            q = 64 - self.p_prime;
+            m = self.m_prime;
+            C = sparse_register_histogram(self.sparse_list, self.p_prime, p, q)
+        } else {
+            q = 64 - self.p;
+            m = self.m;
+            C = register_histogram(self.m, q);
+        }
+        let mut est_denominator = m * tau(1.0 - C[q + 1] as f64 / m as f64);
+        // skip prints
+        // skip prints
+        for k in (0..q).rev() {
+            est_denominator += C[k] as f64;
+            est_denominator *= 0.5;
+        }
+        // skip prints
+        // skip prints
+        est_denominator += m * sigma(C[q + 1] as f64 / m as f64);
+        // skip prints
+        unsafe {
+            m_sq_alpha_inf = m / (2.0 * logf64(2)) * m;
+        };
+        est = m_sq_alpha_inf / est_denominator;
+
+        if self.use_n_observed && self.n_observed < est {
+            self.n_observed as u64
+        } else {
+            est.round() as u64
+        }
+    }
+
+    fn heule_cardinality(&self, correct_bias: bool) -> u64 {
+        if self.p > 18 {
+            eprintln!("Huele HLL++ only supports precisions up to 18");
+            return self.ertl_cardinality();
+        }
+        if self.sparse {
+            // if sparse then use linear counting
+            let lc_estimate = self.linea_counting(
+                self.m_prime,
+                self.m_prime - self.sparse_list.len(),
+                lc_estimate,
+            );
+            eprintln!(
+                "Sparse representation, using linear counting estimate: {}",
+                lc_estimate
+            );
+            return lc_estimate;
+        }
+
+        let v = count_zeros(&self.m);
+        if v != 0 {
+            let lc_esimate = (self.linear_counting(self.m, v) as f64).round() as u64;
+            eprintln!("Using linear counting estimate: {}", lc_esimate);
+            // check if lc estimate is below the threshold
+            // assert(lc_estimate >= 0)
+            if lc_esimate <= self.threshold[self.p as usize - 4] {
+                return lc_esimate;
+            }
+            eprintln!(
+                "Linear counting estimate above threshold {}",
+                self.threshold[self.p as usize - 4]
+            );
+        }
+
+        // estimate cardinality on registers
+        let mut est = calculate_raw_estimate(&self.m);
+        eprintln!(" Raw estimate: {}", est);
+        // correct for biases if estimate smaller than 5m
+        if (correct_bias && est <= self.m * 5.0) {
+            let bias = self.get_estimate_bias(est, self.p);
+            assert!(est > bias);
+            est -= bias;
+        }
+        if self.use_n_observed && self.n_observed < est {
+            self.n_observed as u64
+        } else {
+            est.round() as u64
+        }
+    }
+
+    fn cardinality(&self) -> u64 {
+        self.ertl_cardinality()
+    }
+
+    fn size(&self) -> u64 {
+        self.cardinality()
+    }
+}
+
+
+
         
     }
     fn switch_to_normal_representation(&mut self) {
