@@ -44,6 +44,7 @@ struct HyperLogLogPlusMinus {
     sparse: bool,
     sparse_list: HashSet<u32>,
     hash_function: fn(u64) -> u64, // Function pointer for the hash function
+    pub use_n_observed: bool,
 }
 
 impl<T> HyperLogLogPlusMinus<T> {
@@ -56,6 +57,7 @@ impl<T> HyperLogLogPlusMinus<T> {
             registers: vec![0; 1 << precision],
             sparse_list: HashSet::new(),
             hash_function: wang_mixer,
+            use_n_observed = true,
             // bit_mixer: Some(default_hash_function),
         }
     }
@@ -87,7 +89,7 @@ impl<T> HyperLogLogPlusMinus<T> {
             self.M = other.M.clone();
         }
         else {
-            let n_observed += other.n_observed();
+            let n_observed = n_observed + other.n_observed();
             if self.sparse && other.sparse {
                 self.sparse_list.extend(other.sparse_list.iter());
             }
@@ -113,6 +115,12 @@ impl<T> HyperLogLogPlusMinus<T> {
         }
     }
     fn cardinality(&self) -> u64 { /* Implementation here */
+        ertl_cardinality();
+
+    }
+
+    fn ertl_cardinality(){
+        
     }
     fn switch_to_normal_representation(&mut self) {
         if !self.sparse {
