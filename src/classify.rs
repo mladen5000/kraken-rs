@@ -12,12 +12,6 @@ pub const NUM_FRAGMENTS_PER_THREAD: usize = 10000;
 pub const MATE_PAIR_BORDER_TAXON: TaxId = TAXID_MAX;
 pub const READING_FRAME_BORDER_TAXON: TaxId = TAXID_MAX - 1;
 pub const AMBIGUOUS_SPAN_TAXON: TaxId = TAXID_MAX - 2;
-// Replace with actual value
-const MATE_PAIR_BORDER_TAXON: Taxid = 0;
-// Replace with actual value
-const READING_FRAME_BORDER_TAXON: Taxid = 0;
-// Replace with actual value
-const AMBIGUOUS_SPAN_TAXON: Taxid = 0;
 
 pub struct Options {
     index_filename: String,

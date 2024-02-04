@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufWriter, Write};
 use std::iter;
 use std::num::Wrapping;
+use std::ops::{BitAnd, Shl};
 use std::path::Path;
 
 // Constants based on the provided C++ code
@@ -56,13 +57,13 @@ impl<T> HyperLogLogPlusMinus<T> {
             sparse,
             registers: vec![0; 1 << precision],
             sparse_list: HashSet::new(),
-            hash_function: wang_mixer,
+            hash_function: hash_functions::wang_mixer,
             use_n_observed = true,
             // bit_mixer: Some(default_hash_function),
         }
     }
     pub fn n_observed(&self) -> u64 {
-        n_observed
+        self.n_observed
     }
 
     pub fn insert(&mut self, items: Vec<u64>) {
@@ -89,7 +90,7 @@ impl<T> HyperLogLogPlusMinus<T> {
             self.M = other.M.clone();
         }
         else {
-            let n_observed = n_observed + other.n_observed();
+            let n_observed = self.n_observed + other.n_observed();
             if self.sparse && other.sparse {
                 self.sparse_list.extend(other.sparse_list.iter());
             }
@@ -119,7 +120,7 @@ impl<T> HyperLogLogPlusMinus<T> {
 
     }
 
-    fn flajolet_cardinality(use_sparse_precision: bool) -> () {
+    fn flajolet_cardinality(self,use_sparse_precision: bool) -> () {
         M = vec![0; self.m];
         if use_sparse_precision {
             return linear_counting(self.m_prime, self.m_prime - self.sparse_list.len());
@@ -149,7 +150,7 @@ impl<T> HyperLogLogPlusMinus<T> {
         }
     }
 
-    fn ertl_cardinality() -> u64 {
+    fn ertl_cardinality(self) -> u64 {
         let (q, m): (usize, usize);
         let C = vec![];
 
@@ -242,12 +243,10 @@ impl<T> HyperLogLogPlusMinus<T> {
     fn size(&self) -> u64 {
         self.cardinality()
     }
-}
 
 
 
         
-    }
     fn switch_to_normal_representation(&mut self) {
         if !self.sparse {
             return;
@@ -275,12 +274,11 @@ impl<T> HyperLogLogPlusMinus<T> {
             }
         }
     }
-}
 // Additional methods as needed
+}
 
 // Methods for sparse representation, bias correction, and improved estimators
 mod ertl_improved_estimator {
-    use std::intrinsics::sqrtf64;
 
     fn sigma(x: f64) -> f64 {
         /* Implementation here */
@@ -324,8 +322,8 @@ mod ertl_improved_estimator {
 }
 
 // Hash functions and other utilities
-mod hash_functions {
-    fn ranhash(u: u64) -> u64 {
+pub mod hash_functions {
+    pub fn ranhash(u: u64) -> u64 {
         /* Implementation here */
         let mut v: u64 = u * 3935559000370003845 + 2691343689449507681;
         v ^= v >> 21;
@@ -338,7 +336,7 @@ mod hash_functions {
 
         return v;
     }
-    fn murmurhash3_finalizer(mut key: u64) -> u64 {
+    pub fn murmurhash3_finalizer(mut key: u64) -> u64 {
         //murmurhash returns a hash value of 0 for the key 0 - avoid that.
         key ^= key >> 33;
         key *= 0xff51afd7ed558ccd;
@@ -347,7 +345,7 @@ mod hash_functions {
         key ^= key >> 33;
         return key;
     }
-    fn wang_mixer(mut key: u64) -> u64 {
+    pub fn wang_mixer(mut key: u64) -> u64 {
         key = (!key) + (key << 21);
         key = key ^ (key >> 24);
         key = (key + (key << 3)) + (key << 8); // key * 265
@@ -378,7 +376,6 @@ mod reports {
 }
 
 // Define a struct for HyperLogLogPlusMinus
-
 impl HyperLogLogPlusMinus {
     // Constructor with hash function parameter
     fn new(precision: u8, sparse: bool, hash_function: fn(u64) -> u64) -> Self {

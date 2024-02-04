@@ -1,17 +1,13 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::error::Error;
 use std::fs::File;
-use std::hash::Hash;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::mem;
 use std::process;
-use std::str::FromStr;
 
 const FILE_MAGIC: &str = "K2TAXDAT";
 

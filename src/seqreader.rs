@@ -10,11 +10,11 @@ fn strip_string(str: &mut String) {
 }
 
 /// Represents a biological sequence with its format, id, sequence data, and quality scores.
-struct Sequence {
-    format: SequenceFormat,
-    id: String,
-    seq: String,
-    quals: String,
+pub struct Sequence {
+    pub format: SequenceFormat,
+    pub id: String,
+    pub seq: String,
+    pub quals: String,
 }
 
 impl Sequence {
@@ -42,7 +42,7 @@ impl Sequence {
 }
 
 /// Specifies the format of the sequence (FASTA, FASTQ, or auto-detection).
-enum SequenceFormat {
+pub enum SequenceFormat {
     AutoDetect,
     Fasta,
     Fastq,

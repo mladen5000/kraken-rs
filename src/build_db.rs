@@ -1,14 +1,13 @@
-use crate::ncbi_taxonomy;
 use crate::taxonomy::NCBITaxonomy;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process;
 const DEFAULT_BLOCK_SIZE: usize = (10 * 1024 * 1024);
-const DEFAULT_SUBBLOCK_SIZE: usize = (1024);
+const DEFAULT_SUBBLOCK_SIZE: usize = 1024;
 
 struct Options {
-    ID_to_taxon_map_filename: String,
+    id_to_taxon_map_filename: String,
     ncbi_taxonomy_directory: String,
     hashtable_filename: String,
     options_filename: String,
