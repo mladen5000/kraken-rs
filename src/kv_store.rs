@@ -1,10 +1,12 @@
-struct KeyValueStore {}
+pub struct KeyValueStore {}
 
 pub type HKey = u64;
 pub type HValue = u32;
 
-pub trait KeyValueStore {
-    fn get(&self, key: HKey) -> Option<HValue>;
+impl KeyValueStore {
+    pub fn get(&self, key: HKey) -> Option<HValue> {
+        Some(HValue::from(0))
+    }
 }
 
 pub fn murmurhash3(key: u64) -> u64 {

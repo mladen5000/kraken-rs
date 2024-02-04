@@ -10,7 +10,7 @@ checksum = "5d3d0e0f38255e7fa3cf31335b3a56f05febd18025f4db5ef7a0cfb4f8da651f"
 
 [[package]]
 name = "kraken-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "num_cpus",
 ]

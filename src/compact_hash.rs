@@ -1,3 +1,4 @@
+use crate::kv_store::murmurhash3;
 pub use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -105,7 +106,6 @@ impl CompactHashTableTrait for CompactHashTable {
         table
     }
     fn get(&self, key: u64) -> Option<u64> {
-        use crate::kv_store::murmurhash3;
         let hc = murmurhash3(key);
         let compacted_key = hc >> (32 + self.value_bits);
         let mut idx = hc % self.capacity.load(Ordering::Relaxed) as u64;
@@ -121,7 +121,7 @@ impl CompactHashTableTrait for CompactHashTable {
                 return Some(table[idx as usize].value(self.value_bits));
             }
             if step == 0 {
-                step = second_hash(hc);
+                step = self.second_hash(hc);
             }
             idx += step;
             idx %= self.capacity.load(Ordering::Relaxed) as u64;
@@ -132,7 +132,7 @@ impl CompactHashTableTrait for CompactHashTable {
         None
     }
     fn find_index(&self, key: u64) -> Option<usize> {
-        let hc = murmur_hash_3(key);
+        let hc = murmurhash3(key);
         let compacted_key = hc >> (32 + self.value_bits);
         let mut idx = hc % self.capacity.load(Ordering::Relaxed) as u64;
         let first_idx = idx;
@@ -147,7 +147,7 @@ impl CompactHashTableTrait for CompactHashTable {
                 return Some(idx as usize);
             }
             if step == 0 {
-                step = second_hash(hc);
+                step = self.second_hash(hc);
             }
             idx += step;
             idx %= self.capacity.load(Ordering::Relaxed) as u64;
@@ -161,7 +161,7 @@ impl CompactHashTableTrait for CompactHashTable {
         if self.file_backed || new_value == 0 {
             return false;
         }
-        let hc = murmur_hash_3(key);
+        let hc = murmurhash3(key);
         let compacted_key = hc >> (32 + self.value_bits);
         let mut idx = hc % self.capacity.load(Ordering::Relaxed) as u64;
         let first_idx = idx;
@@ -191,7 +191,7 @@ impl CompactHashTableTrait for CompactHashTable {
                 }
             }
             if step == 0 {
-                step = second_hash(hc);
+                step = self.second_hash(hc);
             }
             idx += step;
             idx %= self.capacity.load(Ordering::Relaxed) as u64;

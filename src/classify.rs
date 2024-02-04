@@ -1,4 +1,5 @@
 use crate::aa_translate::translate_to_all_frames;
+use crate::kv_store::KeyValueStore;
 // use crate::build_db::TaxId;
 use crate::compact_hash::CompactHashTable;
 use crate::kraken2_data::IndexOptions;
