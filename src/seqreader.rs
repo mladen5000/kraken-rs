@@ -9,10 +9,10 @@ fn strip_string(str: &mut String) {
     }
 }
 
-/// Represents a biological sequence with its format, header, sequence data, and quality scores.
+/// Represents a biological sequence with its format, id, sequence data, and quality scores.
 struct Sequence {
     format: SequenceFormat,
-    header: String,
+    id: String,
     seq: String,
     quals: String,
 }
@@ -21,7 +21,7 @@ impl Sequence {
     fn new() -> Self {
         Sequence {
             format: SequenceFormat::AutoDetect,
-            header: String::new(),
+            id: String::new(),
             seq: String::new(),
             quals: String::new(),
         }
@@ -29,7 +29,7 @@ impl Sequence {
 
     /// Converts the sequence to a string representation based on its format.
     fn to_string(&self) -> String {
-        let mut repr = self.header.clone();
+        let mut repr = self.id.clone();
         repr.push('\n');
         repr.push_str(&self.seq);
         if self.format == SequenceFormat::Fastq {
@@ -117,7 +117,7 @@ impl<R: BufRead> BatchSequenceReader<R> {
 
         let mut sequence = Sequence::new();
         sequence.format = file_format.clone();
-        sequence.header = line.trim_end().to_string();
+        sequence.id = line.trim_end().to_string();
 
         match file_format {
             SequenceFormat::Fasta => {
@@ -177,7 +177,7 @@ impl<R: BufRead> BatchSequenceReader<R> {
                 }
             };
         } else {
-            // Read the first line of the sequence (header).
+            // Read the first line of the sequence (id).
             if self.reader.read_line(&mut line)? == 0 {
                 return Ok(None);
             }
@@ -186,13 +186,13 @@ impl<R: BufRead> BatchSequenceReader<R> {
 
         let mut seq = Sequence::new();
         seq.format = self.format.clone();
-        seq.header = line;
+        seq.id = line;
 
         match self.format {
             SequenceFormat::Fasta => {
                 while self.reader.read_line(&mut line)? != 0 {
                     if line.starts_with('>') {
-                        break; // Next sequence header reached.
+                        break; // Next sequence id reached.
                     }
                     strip_string(&mut line);
                     seq.seq.push_str(&line);
@@ -264,7 +264,7 @@ mod tests {
         let sequence = BatchSequenceReader::read_next_sequence(&mut reader, &mut format)
             .unwrap()
             .unwrap();
-        assert_eq!(sequence.header, ">seq1");
+        assert_eq!(sequence.id, ">seq1");
         assert_eq!(sequence.seq, "ACGTTGCA");
         assert_eq!(sequence.quals, "");
         assert_eq!(format, SequenceFormat::Fasta);
@@ -279,7 +279,7 @@ mod tests {
         let sequence = BatchSequenceReader::read_next_sequence(&mut reader, &mut format)
             .unwrap()
             .unwrap();
-        assert_eq!(sequence.header, "@seq1");
+        assert_eq!(sequence.id, "@seq1");
         assert_eq!(sequence.seq, "ACGT");
         assert_eq!(sequence.quals, "!!!!");
         assert_eq!(format, SequenceFormat::Fastq);

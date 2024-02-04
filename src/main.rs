@@ -1,6 +1,8 @@
 pub mod aa_translate;
-// pub mod build_db;
-// pub mod ncbi_taxonomy;
+pub mod build_db;
+pub mod classify;
+mod hyperloglogplus;
+pub mod kv_store;
 pub mod reports;
 pub mod seqreader;
 pub mod taxonomy;
