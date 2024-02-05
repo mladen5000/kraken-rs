@@ -1,24 +1,17 @@
 use crate::aa_translate::translate_to_all_frames;
-use crate::kv_store::KeyValueStore;
-// use crate::build_db::TaxId;
 use crate::compact_hash::CompactHashTable;
-use crate::kraken2_data::IndexOptions;
-use crate::kraken2_data::TaxId;
-use crate::kraken2_data::TAXID_MAX;
-use crate::kv_store;
-use crate::kv_store::*;
-use crate::reports;
-use crate::reports::{TaxonCounters, TaxonCounts};
+use crate::kraken2_data::{IndexOptions, TaxId, TAXID_MAX};
+use crate::kv_store::KeyValueStore;
+use crate::reports::{self, TaxonCounters, TaxonCounts};
+use crate::seqreader::Sequence;
+use crate::taxonomy::Taxonomy;
 use num_cpus;
-use std::process;
 
-use crate::seqreader::{Sequence, SequenceFormat};
-use crate::taxonomy::*;
 use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::fs::File;
-use std::io::{self, Write};
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
+use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -126,8 +119,8 @@ fn main() {
                     panic!("paired end processing used with unpaired file");
                 }
                 process_files(
-                    Some(std::env::args().nth(i).unwrap()),
-                    Some(std::env::args().nth(i + 1).unwrap()),
+                    Some(&std::env::args().nth(i).unwrap()),
+                    Some(&std::env::args().nth(i + 1).unwrap()),
                     &mut hash_ptr,
                     &mut taxonomy,
                     &mut idx_opts,
@@ -206,23 +199,29 @@ fn report_stats(start_time: Instant, end_time: Instant, stats: &mut Classificati
 }
 
 fn process_files(
-    filename1: &str,
-    filename2: &str,
-    hash: &mut KeyValueStore,
-    tax: &mut Taxonomy,
-    idx_opts: &mut IndexOptions,
-    opts: &mut Options,
-    stats: &mut ClassificationStats,
-    outputs: &mut OutputStreamData,
-    total_taxon_counters: &mut TaxonCounters,
+    filename1: Option<&str>,
+    filename2: Option<&str>,
+    hash: Arc<Mutex<KeyValueStore>>,
+    tax: Arc<Mutex<Taxonomy>>,
+    idx_opts: Arc<Mutex<IndexOptions>>,
+    opts: Arc<Mutex<Options>>,
+    stats: Arc<Mutex<ClassificationStats>>,
+    outputs: Arc<Mutex<OutputStreamData>>,
+    total_taxon_counters: Arc<Mutex<TaxonCounters>>,
 ) {
     let fptr1 = match filename1 {
-        Some(name) => Box::new(BufReader::new(File::open(name).unwrap())) as Box<dyn Read>,
-        None => Box::new(BufReader::new(std::io::stdin())) as Box<dyn Read>,
+        Some(name) => Arc::new(Mutex::new(
+            Box::new(BufReader::new(File::open(name).unwrap())) as Box<dyn Read>,
+        )),
+        None => Arc::new(Mutex::new(
+            Box::new(BufReader::new(std::io::stdin())) as Box<dyn Read>
+        )),
     };
 
     let fptr2 = match filename2 {
-        Some(name) => Some(Box::new(BufReader::new(File::open(name).unwrap())) as Box<dyn Read>),
+        Some(name) => Some(Arc::new(Mutex::new(
+            Box::new(BufReader::new(File::open(name).unwrap())) as Box<dyn Read>,
+        ))),
         None => None,
     };
 
@@ -231,8 +230,8 @@ fn process_files(
     let threads: Vec<_> = (0..num_cpus::get())
         .map({
             let queue_clone = Arc::clone(&output_queue);
-            let fptr1_clone = fptr1.clone();
-            let fptr2_clone = fptr2.clone();
+            let fptr1_clone = Arc::clone(&fptr1);
+            let fptr2_clone = fptr2.as_ref().map(Arc::clone);
 
             thread::spawn(move || {
                 // Thread-local variables go here

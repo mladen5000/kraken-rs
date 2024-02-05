@@ -1,9 +1,8 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::path::Path;
 
 /// Removes trailing whitespace from a string.
-fn strip_string(str: &mut String) {
+pub fn strip_string(str: &mut String) {
     while str.ends_with(char::is_whitespace) {
         str.pop();
     }
@@ -18,7 +17,7 @@ pub struct Sequence {
 }
 
 impl Sequence {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Sequence {
             format: SequenceFormat::AutoDetect,
             id: String::new(),
@@ -28,7 +27,7 @@ impl Sequence {
     }
 
     /// Converts the sequence to a string representation based on its format.
-    fn to_string(&self) -> String {
+    pub fn to_string(&self) -> String {
         let mut repr = self.id.clone();
         repr.push('\n');
         repr.push_str(&self.seq);
@@ -49,13 +48,13 @@ pub enum SequenceFormat {
 }
 
 /// Reads sequences in batches from a file or stream.
-struct BatchSequenceReader<R: BufRead> {
+pub struct BatchSequenceReader<R: BufRead> {
     reader: R,
     format: SequenceFormat,
 }
 
 impl<R: BufRead> BatchSequenceReader<R> {
-    fn new(reader: R) -> Self {
+    pub fn new(reader: R) -> Self {
         BatchSequenceReader {
             reader,
             format: SequenceFormat::AutoDetect,
@@ -63,7 +62,7 @@ impl<R: BufRead> BatchSequenceReader<R> {
     }
 
     /// Loads a block of data from the input stream.
-    fn load_block(&mut self, block_size: usize) -> io::Result<()> {
+    pub fn load_block(&mut self, block_size: usize) -> io::Result<()> {
         let mut block = vec![0; block_size];
         let bytes_read = self.reader.read(&mut block)?;
         if bytes_read == 0 {
@@ -76,7 +75,7 @@ impl<R: BufRead> BatchSequenceReader<R> {
     }
 
     /// Loads a batch of sequences from the input stream.
-    fn load_batch(&mut self, record_count: usize) -> io::Result<Vec<Sequence>> {
+    pub fn load_batch(&mut self, record_count: usize) -> io::Result<Vec<Sequence>> {
         let mut sequences = Vec::new();
 
         for _ in 0..record_count {
@@ -92,7 +91,7 @@ impl<R: BufRead> BatchSequenceReader<R> {
     // Existing methods...
 
     /// Reads the next sequence from the given input stream.
-    fn read_next_sequence<R: BufRead>(
+    pub fn read_next_sequence<B: BufRead>(
         reader: &mut R,
         file_format: &mut SequenceFormat,
     ) -> io::Result<Option<Sequence>> {
@@ -152,13 +151,14 @@ impl<R: BufRead> BatchSequenceReader<R> {
                 }
                 sequence.quals = line.trim_end().to_string();
             }
+            SequenceFormat::AutoDetect => todo!(),
         }
 
         Ok(Some(sequence))
     }
 
     /// Reads the next sequence from the stream.
-    fn next_sequence(&mut self) -> io::Result<Option<Sequence>> {
+    pub fn next_sequence(&mut self) -> io::Result<Option<Sequence>> {
         let mut line = String::new();
 
         // Detect file format if not already known.
@@ -254,6 +254,7 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+use std::io::Cursor;
 
     #[test]
     fn test_read_fasta_sequence() {

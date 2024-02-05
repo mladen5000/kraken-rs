@@ -47,12 +47,18 @@ impl MinimizerScanner {
             start: 0,
             finish: 0,
             spaced_seed_mask,
-            dna: dna_sequence,
+            dna,
             toggle_mask,
             loaded_ch: 0,
             last_ambig: 0,
             revcom_version,
             lookup_table: [u8::MAX; 256],
+            revcom_version: 0,
+            lmer: 0,
+            last_minimizer: 0,
+            queue: Vec::new(),
+            queue_pos: 0,
+            lmer_mask: 0,
             // Other fields...
         };
 
@@ -71,12 +77,12 @@ impl MinimizerScanner {
         }
 
         scanner.lmer_mask = 1;
-        scanner.lmer_mask <<= (scanner.l
+        scanner.lmer_mask <<= scanner.l
             * (if scanner.dna {
                 BITS_PER_CHAR_DNA
             } else {
                 BITS_PER_CHAR_PRO
-            }));
+            });
         scanner.lmer_mask -= 1;
         scanner.toggle_mask &= scanner.lmer_mask;
 
@@ -183,7 +189,7 @@ impl MinimizerScanner {
                 self.loaded_ch += 1;
                 self.lmer <<= bits_per_char;
                 self.last_ambig <<= bits_per_char;
-                let lookup_code = lookup_table[(self.str[self.str_pos] as usize)];
+                let lookup_code = self.lookup_table[self.str[self.str_pos] as usize];
                 self.str_pos += 1;
                 if lookup_code == u8::MAX {
                     self.queue.clear();
@@ -197,14 +203,14 @@ impl MinimizerScanner {
                 self.lmer &= self.lmer_mask;
                 self.last_ambig &= self.lmer_mask;
                 if (self.str_pos - self.start) >= self.k as usize && self.loaded_ch < self.l {
-                    return Some(self.last_minimizer);
+                    return Some(&self.last_minimizer);
                 }
             }
             if self.loaded_ch < self.l {
                 return None;
             }
             let mut canonical_lmer = if self.dna {
-                Self::canonical_representation(self.lmer, self.l)
+                Self::canonical_representation(&self, self.lmer, self.l)
             } else {
                 self.lmer
             };
@@ -214,7 +220,7 @@ impl MinimizerScanner {
             let candidate_lmer = canonical_lmer ^ self.toggle_mask;
             if self.k == self.l {
                 self.last_minimizer = candidate_lmer ^ self.toggle_mask;
-                return Some(self.last_minimizer);
+                return Some(&self.last_minimizer);
             }
             while let Some(back) = self.queue.back() {
                 if back.candidate > candidate_lmer {
@@ -247,7 +253,7 @@ impl MinimizerScanner {
         }
         assert!(!self.queue.is_empty());
         self.last_minimizer = self.queue.front().unwrap().candidate ^ self.toggle_mask;
-        Some(self.last_minimizer)
+        Some(&self.last_minimizer)
     }
 
     pub fn last_minimizer(&self) -> u64 {
@@ -271,7 +277,7 @@ impl MinimizerScanner {
         (self.queue_pos < self.k - self.l) || (self.last_ambig != 0)
     }
 
-    pub fn reverse_complement(kmer: u64, n: u8) -> u64 {
+    pub fn reverse_complement(&self, kmer: u64, n: u8) -> u64 {
         let mut kmer = kmer;
         kmer = ((kmer & 0xCCCCCCCCCCCCCCCC) >> 2) | ((kmer & 0x3333333333333333) << 2);
         kmer = ((kmer & 0xF0F0F0F0F0F0F0F0) >> 4) | ((kmer & 0x0F0F0F0F0F0F0F0F) << 4);
@@ -293,7 +299,7 @@ impl MinimizerScanner {
 
     fn set_lookup_table_character(&mut self, ch: char, val: u8) {
         // Implement the method here
-        self.lookup_table[c as usize] = val;
-        self.lookup_table[c.to_ascii_lowercase as usize] = val;
+        self.lookup_table[ch as usize] = val;
+        self.lookup_table[ch.to_ascii_lowercase as usize] = val;
     }
 }

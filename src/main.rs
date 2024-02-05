@@ -6,6 +6,8 @@ mod estimate_capacity;
 pub mod hyperloglogplus;
 pub mod kraken2_data;
 pub mod kv_store;
+pub mod mmscanner;
+pub mod readcounts;
 pub mod reports;
 pub mod seqreader;
 pub mod taxonomy;
