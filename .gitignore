@@ -1,3 +1,4 @@
 /target
 /.vscode
 /kraken2
+Cargo.lock
