@@ -5,8 +5,10 @@ use crate::kv_store::KeyValueStore;
 use crate::reports::{self, TaxonCounters, TaxonCounts};
 use crate::seqreader::Sequence;
 use crate::taxonomy::Taxonomy;
+use clap::{Arg, Parser, ValueEnum};
 use num_cpus;
 
+use clap::Clap;
 use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::fs::File;
@@ -21,28 +23,109 @@ pub const MATE_PAIR_BORDER_TAXON: TaxId = TAXID_MAX;
 pub const READING_FRAME_BORDER_TAXON: TaxId = TAXID_MAX - 1;
 pub const AMBIGUOUS_SPAN_TAXON: TaxId = TAXID_MAX - 2;
 
-pub struct Options {
-    index_filename: String,
-    taxonomy_filename: String,
-    options_filename: String,
-    report_filename: String,
-    classified_output_filename: String,
-    unclassified_output_filename: String,
-    kraken_output_filename: String,
-    mpa_style_report: bool,
-    report_kmer_data: bool,
+// pub struct Options {
+//     index_filename: String,
+//     taxonomy_filename: String,
+//     options_filename: String,
+//     report_filename: String,
+//     classified_output_filename: String,
+//     unclassified_output_filename: String,
+//     kraken_output_filename: String,
+//     mpa_style_report: bool,
+//     report_kmer_data: bool,
+//     quick_mode: bool,
+//     report_zero_counts: bool,
+//     use_translated_search: bool,
+//     print_scientific_name: bool,
+//     confidence_threshold: f64,
+//     num_threads: i32,
+//     paired_end_processing: bool,
+//     single_file_pairs: bool,
+//     minimum_quality_score: i32,
+//     minimum_hit_groups: i32,
+//     use_memory_mapping: bool,
+//     match_input_order: bool,
+// }
+
+/// Application options specified via command-line arguments.
+#[derive(Parser, Debug, Clap, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Options {
+    /// Kraken 2 index filename
+    #[clap(short = 'H', long)]
+    index_filename: PathBuf,
+
+    /// Kraken 2 taxonomy filename
+    #[clap(short = 't', long)]
+    taxonomy_filename: PathBuf,
+
+    /// Kraken 2 options filename
+    #[clap(short = 'o', long)]
+    options_filename: PathBuf,
+
+    /// Quick mode
+    #[clap(short = 'q', long, action)]
     quick_mode: bool,
-    report_zero_counts: bool,
-    use_translated_search: bool,
-    print_scientific_name: bool,
-    confidence_threshold: f64,
-    num_threads: i32,
-    paired_end_processing: bool,
-    single_file_pairs: bool,
-    minimum_quality_score: i32,
-    minimum_hit_groups: i32,
+
+    /// Use memory mapping to access hash & taxonomy
+    #[clap(short = 'M', long, action)]
     use_memory_mapping: bool,
-    match_input_order: bool,
+
+    /// Confidence score threshold
+    #[clap(short = 'T', long, default_value_t = 0.0)]
+    confidence_threshold: f32,
+
+    /// Number of threads
+    #[clap(short = 'p', long, default_value_t = 1)]
+    num_threads: usize,
+
+    /// Minimum quality score (FASTQ only)
+    #[clap(short = 'Q', long, default_value_t = 0)]
+    minimum_quality_score: u32,
+
+    /// Process pairs of reads
+    #[clap(short = 'P', long, action)]
+    paired_end_processing: bool,
+
+    /// Process pairs with mates in same file
+    #[clap(short = 'S', long, action)]
+    single_file_pairs: bool,
+
+    /// Print report to filename
+    #[clap(short = 'R', long)]
+    report_filename: Option<PathBuf>,
+
+    /// In combination with -R, use mpa-style report
+    #[clap(short = 'm', long, action)]
+    mpa_style_report: bool,
+
+    /// In combination with -R, report taxa with 0 count
+    #[clap(short = 'z', long, action)]
+    report_zero_counts: bool,
+
+    /// Print scientific name instead of taxid in Kraken output
+    #[clap(short = 'n', long, action)]
+    print_scientific_name: bool,
+
+    /// Minimum number of hit groups needed for call
+    #[clap(short = 'g', long, default_value_t = 0)]
+    minimum_hit_groups: u32,
+
+    /// Filename/format to have classified sequences
+    #[clap(short = 'C', long)]
+    classified_output_filename: Option<PathBuf>,
+
+    /// Filename/format to have unclassified sequences
+    #[clap(short = 'U', long)]
+    unclassified_output_filename: Option<PathBuf>,
+
+    /// Output file for normal Kraken output
+    #[clap(short = 'O', long)]
+    kraken_output_filename: Option<PathBuf>,
+
+    /// In combination with -R, provide minimizer information in report
+    #[clap(short = 'K', long, action)]
+    report_kmer_data: bool,
 }
 pub struct ClassificationStats {
     total_sequences: u64,
@@ -772,7 +855,7 @@ fn initialize_outputs(opts: &Options, outputs: &mut OutputStreamData) {
             outputs.printing_sequences = true;
         }
         if !opts.kraken_output_filename.is_empty() {
-            if opts.kraken_output_filename == "-" {
+            if opts.kraken_output_filename == Some("-") {
                 outputs.kraken_output = None;
             } else {
                 outputs.kraken_output = Some(File::create(&opts.kraken_output_filename).unwrap());

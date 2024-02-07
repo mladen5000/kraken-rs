@@ -2,6 +2,16 @@ use crate::hyperloglogplus::HyperLogLogPlusMinus;
 use crate::reports::ReadCounts;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::mem;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::u64;
+
+use rayon::prelude::*;
 
 pub struct IndexOptions {
     k: usize,
