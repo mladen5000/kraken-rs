@@ -64,9 +64,38 @@ impl<T> ReadCounts<T> {
 
 type ReadCounter = ReadCounts<HyperLogLogPlusMinus>;
 
-pub struct TaxonCounts(HashMap<u64, u64>); // Map of taxon ID to count
+pub struct TaxonCounts(pub HashMap<u64, u64>); // Map of taxon ID to count
+impl TaxonCounts {
+    pub fn new() -> Self {
+        TaxonCounts { 0: HashMap::new() }
+    }
+    pub fn iter(&self) -> std::collections::hash_map::Iter<u64, u64> {
+        self.0.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::collections::hash_map::IterMut<u64, u64> {
+        self.0.iter_mut()
+    }
+}
+impl Iterator for TaxonCounts {
+    type Item = (u64, u64);
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
 pub struct TaxonCounters(HashMap<u64, ReadCounter>); // Map of taxon ID to ReadCounter
-                                                     // type TaxonCounters = HashMap<u64, ReadCounter>; // Map of taxon ID to ReadCounter
+
+impl TaxonCounters {
+    pub fn new() -> Self {
+        TaxonCounters { 0: HashMap::new() }
+    }
+}
+impl Default for TaxonCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+// type TaxonCounters = HashMap<u64, ReadCounter>; // Map of taxon ID to ReadCounter
 
 // Functions
 fn get_clade_counts(tax: &Taxonomy, call_counts: &TaxonCounts) -> TaxonCounts {
@@ -189,7 +218,7 @@ pub fn mpa_report_dfs<W: Write>(
 pub fn report_mpa_style<W: Write>(
     writer: &mut W,
     report_zeros: bool,
-    taxonomy: &Taxonomy,
+    taxonomy: &mut Taxonomy,
     call_counters: &TaxonCounters,
 ) {
     let mut call_counts = TaxonCounts(HashMap::new());

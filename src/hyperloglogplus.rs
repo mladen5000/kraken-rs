@@ -1,18 +1,11 @@
-use std::cmp;
 use std::collections::HashSet;
-use std::f64;
-use std::f64::consts::LN_2;
-use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::{self, BufWriter, Write};
-use std::iter;
-use std::num::Wrapping;
 use std::ops::{BitAnd, Shl};
-use std::path::Path;
 
 // Constants based on the provided C++ code
 const P_PRIME: u8 = 25;
 const M_PRIME: usize = 1 << P_PRIME;
+
+type SparseListType = HashSet<u32>;
 
 // Helper functions for bit operations
 fn clz(x: u64) -> u8 {
@@ -48,271 +41,49 @@ pub struct HyperLogLogPlusMinus {
     pub use_n_observed: bool,
 }
 
-impl<T> HyperLogLogPlusMinus<T> {
-    // Constructor
-    fn new(precision: u8, sparse: bool) -> Self {
-        Self {
-            p: precision,
-            m: 1 << precision,
-            sparse,
-            registers: vec![0; 1 << precision],
-            sparse_list: HashSet::new(),
-            hash_function: hash_functions::wang_mixer,
-            use_n_observed: true,
-            // bit_mixer: Some(default_hash_function),
-        }
-    }
-    pub fn n_observed(&self) -> u64 {
-        self.n_observed
-    }
-
-    pub fn insert(&mut self, items: Vec<u64>) {
-        for i in items {
-            self.insert(i);
-        }
-    }
-    pub fn reset(&mut self) {
-        self.sparse = true;
-        self.sparse_list.clear();
-        self.M.clear();
-    }
-    pub fn merge(&mut self, other: &Self) {
-        if self.p != other.p {
-            panic!("Cannot merge HyperLogLogPlusMinus instances with different precisions");
-        }
-        if other.n_observed() == 0 {
-            return;
-        }
-        if self.n_observed() == 0 {
-            let n_observed = other.n_observed();
-            let sparse = other.sparse;
-            let sparselist = other.sparselist;
-            self.M = other.M.clone();
-        } else {
-            let n_observed = self.n_observed + other.n_observed();
-            if self.sparse && other.sparse {
-                self.sparse_list.extend(other.sparse_list.iter());
-            } else if other.sparse {
-                self.add_to_registers(other.sparse_list);
-            } else {
-                if self.sparse {
-                    self.sparse = false;
-                    self.M = other.M;
-                    self.add_to_registers(self.sparse_list);
-                    self.sparse_list.clear()
-                } else {
-                    //merge registers
-                    for i in 0..M.size() {
-                        if other.M[i] > self.M[i] {
-                            self.M[i] = other.M[i];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    fn cardinality(&self) -> u64 {
-        /* Implementation here */
-        ertl_cardinality();
-    }
-
-    fn flajolet_cardinality(self, use_sparse_precision: bool) -> () {
-        M = vec![0; self.m];
-        if use_sparse_precision {
-            return linear_counting(self.m_prime, self.m_prime - self.sparse_list.len());
-        } else {
-            // for testing purposes
-            M = vec![0; self.m];
-            for val in self.sparse_list {
-                let idx = get_index(val, self.p);
-                assert!(idx < self.m.len());
-                let rank_val = get_encoded_rank(val, self.p_prime, self.p);
-                if rank_val > self.M[idx] {
-                    self.M[idx] = rank_val;
-                }
-            }
-        }
-        let est = calculate_raw_estimate(M);
-        if est <= self.m * 2.5 {
-            let v = count_zeros(M);
-            if v > 0 {
-                est = linear_counting(m, v);
-            }
-        }
-        if self.use_n_observed && self.n_observed < est {
-            self.n_observed as u64
-        } else {
-            est.round() as u64
-        }
-    }
-
-    fn ertl_cardinality(self) -> u64 {
-        let (q, m): (usize, usize);
-        let C = vec![];
-
-        if self.sparse {
-            q = 64 - self.p_prime;
-            m = self.m_prime;
-            C = sparse_register_histogram(self.sparse_list, self.p_prime, p, q)
-        } else {
-            q = 64 - self.p;
-            m = self.m;
-            C = register_histogram(self.m, q);
-        }
-        let mut est_denominator = m * tau(1.0 - C[q + 1] as f64 / m as f64);
-        // skip prints
-        // skip prints
-        for k in (0..q).rev() {
-            est_denominator += C[k] as f64;
-            est_denominator *= 0.5;
-        }
-        // skip prints
-        // skip prints
-        est_denominator += m * sigma(C[q + 1] as f64 / m as f64);
-        // skip prints
-        unsafe {
-            m_sq_alpha_inf = m / (2.0 * logf64(2)) * m;
-        };
-        est = m_sq_alpha_inf / est_denominator;
-
-        if self.use_n_observed && self.n_observed < est {
-            self.n_observed as u64
-        } else {
-            est.round() as u64
-        }
-    }
-
-    fn heule_cardinality(&self, correct_bias: bool) -> u64 {
-        if self.p > 18 {
-            eprintln!("Huele HLL++ only supports precisions up to 18");
-            return self.ertl_cardinality();
-        }
-        if self.sparse {
-            // if sparse then use linear counting
-            let lc_estimate = self.linea_counting(
-                self.m_prime,
-                self.m_prime - self.sparse_list.len(),
-                lc_estimate,
-            );
-            eprintln!(
-                "Sparse representation, using linear counting estimate: {}",
-                lc_estimate
-            );
-            return lc_estimate;
-        }
-
-        let v = count_zeros(&self.m);
-        if v != 0 {
-            let lc_esimate = (self.linear_counting(self.m, v) as f64).round() as u64;
-            eprintln!("Using linear counting estimate: {}", lc_esimate);
-            // check if lc estimate is below the threshold
-            // assert(lc_estimate >= 0)
-            if lc_esimate <= self.threshold[self.p as usize - 4] {
-                return lc_esimate;
-            }
-            eprintln!(
-                "Linear counting estimate above threshold {}",
-                self.threshold[self.p as usize - 4]
-            );
-        }
-
-        // estimate cardinality on registers
-        let mut est = calculate_raw_estimate(&self.m);
-        eprintln!(" Raw estimate: {}", est);
-        // correct for biases if estimate smaller than 5m
-        if (correct_bias && est <= self.m * 5.0) {
-            let bias = self.get_estimate_bias(est, self.p);
-            assert!(est > bias);
-            est -= bias;
-        }
-        if self.use_n_observed && self.n_observed < est {
-            self.n_observed as u64
-        } else {
-            est.round() as u64
-        }
-    }
-
-    fn cardinality(&self) -> u64 {
-        self.ertl_cardinality()
-    }
-
-    fn size(&self) -> u64 {
-        self.cardinality()
-    }
-
-    fn switch_to_normal_representation(&mut self) {
-        if !self.sparse {
-            return;
-        }
-        self.sparse = false;
-        self.M = vec![0u8; self.m];
-        add_to_registers(self.sparse_list);
-        self.sparse_list.clear();
-    }
-
-    fn add_to_registers(&mut self, sparse_list: SparseListType) {
-        if self.sparse {
-            eprintln!("Cannot add to registers in sparse representation");
-            return;
-        }
-        if self.sparse_list.size() == 0 {
-            return;
-        }
-        for encoded_hash_value_ptr in (self.sparse_list.begin()..self.sparse_list.end()) {
-            let idx: usize = get_index(*encoded_hash_value_ptr, self.p);
-            assert(idx < M.size());
-            let rank_val = get_encoded_rank(*encoded_hash_value_ptr, P_PRIME, self.p);
-            if rank_val > self.M[idx] {
-                self.M[idx] = rank_val;
-            }
-        }
-    }
-    // Additional methods as needed
-}
-
 // Methods for sparse representation, bias correction, and improved estimators
-mod ertl_improved_estimator {
 
-    fn sigma(x: f64) -> f64 {
-        /* Implementation here */
-        assert!(x);
-        if x == 1.0 {
-            return f64::INFINITY;
-        }
-        let (prev_sigma_x, sigma_x, y) = (0.0, 0.0, 0.0);
+// Additional memod ertl_improved_estimator {
 
-        loop {
-            prev_sigma_x = sigma_x;
-            x *= x;
-            sigma_x += x * y;
-            y += y;
-            if sigma_x == prev_sigma_x {
-                break;
-            }
-        }
-        return sigma_x;
+fn sigma(x: f64) -> f64 {
+    /* Implementation here */
+    assert!(x);
+    if x == 1.0 {
+        return f64::INFINITY;
     }
+    let (prev_sigma_x, sigma_x, y) = (0.0, 0.0, 0.0);
 
-    fn tau(x: f64) -> f64 {
-        assert!(x >= 0.0 && x <= 1.0);
-        if (x == 0.0 || x == 1.0) {
-            return 0.0;
+    loop {
+        prev_sigma_x = sigma_x;
+        x *= x;
+        sigma_x += x * y;
+        y += y;
+        if sigma_x == prev_sigma_x {
+            break;
         }
-        let (prev_tau_x, y, tau_x) = (0.0, 1.0, 1.0 - x);
-
-        loop {
-            prev_tau_x = tau_x;
-            x = x.sqrt();
-            y /= 2.0;
-            tau_x -= std::pow(1 - x, 2) * y;
-            if tau_x == prev_tau_x {
-                break;
-            }
-        }
-        return tau_x / 3.0;
     }
-    // Additional functions as needed
+    return sigma_x;
 }
+
+pub fn tau(mut x: f64) -> f64 {
+    assert!(x >= 0.0 && x <= 1.0);
+    if (x == 0.0 || x == 1.0) {
+        return 0.0;
+    }
+    let (mut prev_tau_x, mut y, mut tau_x) = (0.0, 1.0, 1.0 - x);
+
+    loop {
+        prev_tau_x = tau_x;
+        x = x.sqrt();
+        y /= 2.0;
+        tau_x -= (1 - x) * (1 - x) * y;
+        if tau_x == prev_tau_x {
+            break;
+        }
+    }
+    return tau_x / 3.0;
+}
+// Additional functions as needed
 
 // Hash functions and other utilities
 pub mod hash_functions {
@@ -367,6 +138,58 @@ impl HyperLogLogPlusMinus {
     }
 
     // Additional methods as needed
+}
+
+fn linear_counting(m: u32, v: u32) -> f64 {
+    if v > m {
+        panic!("number of v should not be greater than m");
+    }
+    (m as f64) * ((m as f64) / (v as f64)).ln()
+}
+fn register_histogram(m: &Vec<u8>, q: u8) -> Vec<i32> {
+    let mut c = vec![0; (q + 2) as usize];
+    for (i, &item) in m.iter().enumerate() {
+        if item >= q + 1 {
+            eprintln!("M[{}] == {}! larger than {}", i, item, q + 1);
+        }
+        c[item as usize] += 1;
+    }
+    assert_eq!(c.iter().sum::<i32>(), m.len() as i32);
+    c
+}
+
+fn sparse_register_histogram(sparse_list: &Vec<u64>, p_prime: u8, p: u8, q: u8) -> Vec<i32> {
+    let mut c = vec![0; (q + 2) as usize];
+    let mut m = 1 << p_prime;
+    for &encoded_hash_value in sparse_list {
+        let rank_val = get_encoded_rank(encoded_hash_value, p_prime, p);
+        c[rank_val as usize] += 1;
+        m -= 1;
+    }
+    c[0] = m as i32;
+    c
+}
+
+fn get_encoded_rank(encoded_hash_value: u64, p_prime: u8, p: u8) -> u8 {
+    // Implement the logic to calculate the rank value
+    0
+}
+fn get_index(hash_value: u64, p: u8) -> u32 {
+    // take first p bits as index  {x63,...,x64-p}
+    (hash_value >> (64 - p)) as u32
+}
+fn calculate_raw_estimate(m: &Vec<u8>) -> f64 {
+    let inverse_sum: f64 = m.iter().map(|&x| 1.0 / (1u64 << x) as f64).sum();
+    alpha(m.len()) * (m.len() * m.len()) as f64 / inverse_sum
+}
+
+fn count_zeros(s: Vec<u8>) -> u32 {
+    s.iter().filter(|&&x| x == 0).count() as u32
+}
+
+fn alpha(m: usize) -> f64 {
+    // Implement the logic to calculate the alpha value
+    0.0
 }
 
 // Unit tests for verifying functionality

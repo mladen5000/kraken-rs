@@ -199,25 +199,29 @@ impl NCBITaxonomy {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Taxonomy {
-    nodes_: Vec<TaxonomyNode>,
-    node_count_: usize,
-    name_data_: String,
-    name_data_len_: usize,
-    rank_data_: String,
-    rank_data_len_: usize,
-    external_to_internal_id_map_: HashMap<usize, usize>,
+    pub nodes_: Vec<TaxonomyNode>,
+    pub node_count_: usize,
+    pub name_data_: String,
+    pub name_data_len_: usize,
+    pub rank_data_: String,
+    pub rank_data_len_: usize,
+    pub external_to_internal_id_map_: HashMap<usize, usize>,
 }
-impl Default for Taxonomy {
-    fn default() -> Self {
-        Taxonomy {
-            ..Default::default()
-        }
-    }
-}
+
 impl Taxonomy {
-    pub fn init(&mut self, filename: &str, memory_mapping: bool) -> Result<(), std::io::Error> {
+    pub fn new(filename: &str, memory_mapping: bool) -> Result<Self, std::io::Error> {
+        let mut taxonomy = Taxonomy {
+            nodes_: Vec::new(),
+            node_count_: 0,
+            name_data_: String::new(),
+            name_data_len_: 0,
+            rank_data_: String::new(),
+            rank_data_len_: 0,
+            external_to_internal_id_map_: HashMap::new(),
+        };
+
         if memory_mapping {
             // Memory mapping is not directly supported in Rust's standard library.
             // You would need to use a crate like memmap.
@@ -236,29 +240,30 @@ impl Taxonomy {
 
             let mut buffer = [0; mem::size_of::<usize>()];
             file.read_exact(&mut buffer)?;
-            self.node_count_ = usize::from_le_bytes(buffer);
+            taxonomy.node_count_ = usize::from_le_bytes(buffer);
 
             file.read_exact(&mut buffer)?;
-            self.name_data_len_ = usize::from_le_bytes(buffer);
+            taxonomy.name_data_len_ = usize::from_le_bytes(buffer);
 
             file.read_exact(&mut buffer)?;
-            self.rank_data_len_ = usize::from_le_bytes(buffer);
+            taxonomy.rank_data_len_ = usize::from_le_bytes(buffer);
 
-            self.nodes_ = vec![TaxonomyNode::default(); self.node_count_ as usize];
-            for node in &mut self.nodes_ {
+            taxonomy.nodes_ = vec![TaxonomyNode::default(); taxonomy.node_count_ as usize];
+            for node in &mut taxonomy.nodes_ {
                 file.read_exact(&mut buffer)?;
                 node.parent_id = usize::from_le_bytes(buffer);
             }
 
-            let mut name_data = vec![0; self.name_data_len_ as usize];
+            let mut name_data = vec![0; taxonomy.name_data_len_ as usize];
             file.read_exact(&mut name_data)?;
-            self.name_data_ = String::from_utf8_lossy(&name_data).to_string();
+            taxonomy.name_data_ = String::from_utf8_lossy(&name_data).to_string();
 
-            let mut rank_data_ = vec![0; self.rank_data_len_ as usize];
+            let mut rank_data_ = vec![0; taxonomy.rank_data_len_ as usize];
             file.read_exact(&mut rank_data_)?;
-            self.rank_data_ = String::from_utf8_lossy(&rank_data_).to_string();
+            taxonomy.rank_data_ = String::from_utf8_lossy(&rank_data_).to_string();
         }
-        Ok(())
+
+        Ok(taxonomy)
     }
     pub fn name_data(&self) -> &String {
         &self.name_data_

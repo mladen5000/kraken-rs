@@ -1,14 +1,24 @@
-use std::collections::{HashSet, VecDeque};
+use crate::build_db::DEFAULT_BLOCK_SIZE;
+use crate::build_db::DEFAULT_SUBBLOCK_SIZE;
+use crate::kv_store::murmurhash3;
+use crate::mmscanner::MinimizerScanner;
+use crate::mmscanner::BITS_PER_CHAR_DNA;
+use crate::mmscanner::BITS_PER_CHAR_PRO;
+use crate::mmscanner::CURRENT_REVCOM_VERSION;
+use crate::mmscanner::DEFAULT_SPACED_SEED_MASK;
+use crate::mmscanner::DEFAULT_TOGGLE_MASK;
+use crate::seqreader::BatchSequenceReader;
+use crate::seqreader::Sequence;
+
+use std::collections::HashSet;
 use std::env;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufReader};
 use std::process;
 
-const RANGE_SECTIONS: usize = 1024; // must be power of 2
-const RANGE_MASK: usize = RANGE_SECTIONS - 1;
-const MAX_N: usize = RANGE_SECTIONS;
 const DEFAULT_N: usize = 4;
-const DEFAULT_BLOCK_SIZE: usize = 30 * 1024 * 1024; // yes, 30 MB
+const RANGE_SECTIONS: usize = 1024; // must be power of 2
+const RANGE_MASK: usize = RANGE_SECTIONS - 1; // must be power of 2
+const MAX_N: usize = RANGE_SECTIONS;
 
 struct Options {
     k: usize,
@@ -22,6 +32,8 @@ struct Options {
 }
 
 fn parse_command_line(args: &[String]) -> Options {
+    const DEFAULT_SPACED_SEED_MASK: u64 = 0;
+
     let mut opts = Options {
         k: 0,
         l: 0,
@@ -181,21 +193,20 @@ fn process_sequence(seq: &str, opts: &Options, sets: &mut Vec<HashSet<u64>>) {
     let mut scanner = MinimizerScanner::new(
         opts.k,
         opts.l,
-        opts.spaced_seed_mask,
         !opts.input_is_protein,
-        opts.toggle_mask,
+        opts.spaced_seed_mask,
     );
     let seq = if opts.input_is_protein {
         format!("{}*", seq)
     } else {
         seq.to_string()
     };
-    scanner.load_sequence(&seq);
+    scanner.load_sequence(&seq, 0, 5);
     while let Some(minimizer) = scanner.next_minimizer() {
         if scanner.is_ambiguous() {
             continue;
         }
-        let hash_code = murmur_hash3(minimizer);
+        let hash_code = murmurhash3(minimizer);
         if (hash_code & RANGE_MASK) < opts.n {
             let index = (hash_code & RANGE_MASK) as usize;
             sets[index].insert(minimizer);
@@ -211,13 +222,13 @@ fn process_sequences(opts: &Options) -> usize {
 
     let mut sum_set_sizes = 0;
     let mut have_work = true;
-    let mut reader = BatchSequenceReader::new();
+    let mut reader = BatchSequenceReader::new(reader);
     let mut sequence = Sequence::new();
 
     while have_work {
-        have_work = reader.load_block(&mut reader, opts.block_size);
+        have_work = reader.load_block(opts.block_size);
         if have_work {
-            while reader.next_sequence(&mut sequence) {
+            while reader.next_sequence() {
                 process_sequence(&sequence.seq, opts, &mut sets);
             }
         }

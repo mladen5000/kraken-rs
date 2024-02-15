@@ -254,7 +254,6 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
-use std::io::Cursor;
 
     #[test]
     fn test_read_fasta_sequence() {

@@ -5,10 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+
 [dependencies]
+memmap2 = "0.9.4"
+clap = { version = "4.5.0", features = ["derive"] }
+rayon = "1.8.1"
 num_cpus = "1.16.0"
 atty = "0.2.14"
-clap = "4.4.18"
+getopts = "0.2.21"
 
 [features]
 linear_probing = []
