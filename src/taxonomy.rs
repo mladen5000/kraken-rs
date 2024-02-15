@@ -173,11 +173,11 @@ impl NCBITaxonomy {
 
             //todo: Probably could just be initialized
             let mut node = zeroes_node;
-            node.parent_id = external_id_map[&self.parent_map_[&external_node_id]];
-            node.external_id = external_node_id;
-            node.rank_offset = rank_offsets[&self.rank_map_[&external_node_id]];
-            node.name_offset = name_data.len();
-            node.first_child = internal_node_id + 1 + bfs_queue.len();
+            node.parent_id = external_id_map[&self.parent_map_[&external_node_id]] as u64;
+            node.external_id = external_node_id as u64;
+            node.rank_offset = rank_offsets[&self.rank_map_[&external_node_id]] as u64;
+            node.name_offset = name_data.len() as u64;
+            node.first_child = (internal_node_id + 1 + bfs_queue.len()) as u64;
             for child_node in &self.child_map_[&external_node_id] {
                 if self.marked_nodes_.contains(child_node) {
                     bfs_queue.push_back(*child_node);
@@ -251,7 +251,7 @@ impl Taxonomy {
             taxonomy.nodes_ = vec![TaxonomyNode::default(); taxonomy.node_count_ as usize];
             for node in &mut taxonomy.nodes_ {
                 file.read_exact(&mut buffer)?;
-                node.parent_id = usize::from_le_bytes(buffer);
+                node.parent_id = usize::from_le_bytes(buffer) as u64;
             }
 
             let mut name_data = vec![0; taxonomy.name_data_len_ as usize];
@@ -283,7 +283,7 @@ impl Taxonomy {
             return false;
         }
         while b > a {
-            b = self.nodes_[b].parent_id;
+            b = self.nodes_[b].parent_id as usize;
         }
         b == a
     }
@@ -295,9 +295,9 @@ impl Taxonomy {
         }
         while a != b {
             if a > b {
-                a = self.nodes_[a].parent_id;
+                a = self.nodes_[a].parent_id as usize;
             } else {
-                b = self.nodes_[b].parent_id;
+                b = self.nodes_[b].parent_id as usize;
             }
         }
         a
@@ -320,7 +320,7 @@ impl Taxonomy {
             taxo_file
                 .write_all(unsafe {
                     std::slice::from_raw_parts(
-                        (node as *const _ as *const u8),
+                        node as *const _ as *const u8,
                         mem::size_of_val(node),
                     )
                 })

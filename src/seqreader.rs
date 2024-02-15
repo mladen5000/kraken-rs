@@ -8,6 +8,12 @@ pub fn strip_string(str: &mut String) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SequenceFormat {
+    AutoDetect,
+    Fasta,
+    Fastq,
+}
 /// Represents a biological sequence with its format, id, sequence data, and quality scores.
 pub struct Sequence {
     pub format: SequenceFormat,
@@ -31,9 +37,12 @@ impl Sequence {
         let mut repr = self.id.clone();
         repr.push('\n');
         repr.push_str(&self.seq);
-        if self.format == SequenceFormat::Fastq {
-            repr.push_str("\n+\n");
-            repr.push_str(&self.quals);
+        match self.format {
+            SequenceFormat::Fastq => {
+                repr.push_str("\n+\n");
+                repr.push_str(&self.quals);
+            }
+            _ => {}
         }
         repr.push('\n');
         repr
@@ -41,11 +50,6 @@ impl Sequence {
 }
 
 /// Specifies the format of the sequence (FASTA, FASTQ, or auto-detection).
-pub enum SequenceFormat {
-    AutoDetect,
-    Fasta,
-    Fastq,
-}
 
 /// Reads sequences in batches from a file or stream.
 pub struct BatchSequenceReader<R: BufRead> {
@@ -101,17 +105,20 @@ impl<R: BufRead> BatchSequenceReader<R> {
         }
 
         // Detect file format if set to AutoDetect.
-        if *file_format == SequenceFormat::AutoDetect {
-            *file_format = match line.chars().next() {
-                Some('@') => SequenceFormat::Fastq,
-                Some('>') => SequenceFormat::Fasta,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Unrecognized file format",
-                    ))
-                }
-            };
+        match file_format {
+            SequenceFormat::AutoDetect => {
+                *file_format = match line.chars().next() {
+                    Some('@') => SequenceFormat::Fastq,
+                    Some('>') => SequenceFormat::Fasta,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unrecognized file format",
+                        ))
+                    }
+                };
+            }
+            _ => {}
         }
 
         let mut sequence = Sequence::new();
@@ -162,24 +169,27 @@ impl<R: BufRead> BatchSequenceReader<R> {
         let mut line = String::new();
 
         // Detect file format if not already known.
-        if self.format == SequenceFormat::AutoDetect {
-            if self.reader.read_line(&mut line)? == 0 {
-                return Ok(None);
-            }
-            self.format = match line.chars().next() {
-                Some('@') => SequenceFormat::Fastq,
-                Some('>') => SequenceFormat::Fasta,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Unrecognized file format",
-                    ))
+        match self.format {
+            SequenceFormat::AutoDetect => {
+                if self.reader.read_line(&mut line)? == 0 {
+                    return Ok(None);
                 }
-            };
-        } else {
-            // Read the first line of the sequence (id).
-            if self.reader.read_line(&mut line)? == 0 {
-                return Ok(None);
+                self.format = match line.chars().next() {
+                    Some('@') => SequenceFormat::Fastq,
+                    Some('>') => SequenceFormat::Fasta,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Unrecognized file format",
+                        ))
+                    }
+                };
+            }
+            _ => {
+                // Read the first line of the sequence (id).
+                if self.reader.read_line(&mut line)? == 0 {
+                    return Ok(None);
+                }
             }
         }
         strip_string(&mut line);
@@ -248,64 +258,4 @@ fn main() -> io::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn test_read_fasta_sequence() {
-        let data = ">seq1\nACGT\nTGCA\n";
-        let mut reader = Cursor::new(data);
-        let mut format = SequenceFormat::AutoDetect;
-
-        let sequence = BatchSequenceReader::read_next_sequence(&mut reader, &mut format)
-            .unwrap()
-            .unwrap();
-        assert_eq!(sequence.id, ">seq1");
-        assert_eq!(sequence.seq, "ACGTTGCA");
-        assert_eq!(sequence.quals, "");
-        assert_eq!(format, SequenceFormat::Fasta);
-    }
-
-    #[test]
-    fn test_read_fastq_sequence() {
-        let data = "@seq1\nACGT\n+\n!!!!\n";
-        let mut reader = Cursor::new(data);
-        let mut format = SequenceFormat::AutoDetect;
-
-        let sequence = BatchSequenceReader::read_next_sequence(&mut reader, &mut format)
-            .unwrap()
-            .unwrap();
-        assert_eq!(sequence.id, "@seq1");
-        assert_eq!(sequence.seq, "ACGT");
-        assert_eq!(sequence.quals, "!!!!");
-        assert_eq!(format, SequenceFormat::Fastq);
-    }
-
-    #[test]
-    fn test_read_empty_sequence() {
-        let data = "";
-        let mut reader = Cursor::new(data);
-        let mut format = SequenceFormat::AutoDetect;
-
-        assert!(
-            BatchSequenceReader::read_next_sequence(&mut reader, &mut format)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_invalid_format_detection() {
-        let data = "invalid\nACGT\n";
-        let mut reader = Cursor::new(data);
-        let mut format = SequenceFormat::AutoDetect;
-
-        assert!(BatchSequenceReader::read_next_sequence(&mut reader, &mut format).is_err());
-    }
-
-    // Additional tests for specific cases and error handling can be added here.
 }

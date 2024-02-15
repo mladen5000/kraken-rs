@@ -29,7 +29,7 @@ pub struct MinimizerScanner<'a> {
     loaded_ch: isize,
     queue: VecDeque<MinimizerData>,
     queue_pos: isize,
-    last_ambig: u64,
+    pub last_ambig: u64,
     lookup_table: [u8; u8::MAX as usize + 1],
     revcom_version: i32,
 }

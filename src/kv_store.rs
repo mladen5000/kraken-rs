@@ -1,20 +1,46 @@
-pub struct KeyValueStore {}
+// File: kraken2_kv_store.rs
 
-pub type HKey = u64;
-pub type HValue = u32;
+use crate::kraken2_data;
+use std::hash::{Hash, Hasher};
+// Type aliases
+type HKey = u64;
+type HValue = u32;
 
-impl KeyValueStore {
-    pub fn get(&self, key: HKey) -> Option<HValue> {
-        Some(HValue::from(0))
+// The Key-Value Store Trait
+trait KeyValueStore {
+    fn get(&self, key: HKey) -> HValue;
+}
+
+// Rust-idiomatic hash function, consider using DefaultHasher if suitable
+fn murmur_hash3(key: HKey) -> u64 {
+    let mut hasher = MurmurHasher::default();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+// A custom MurmurHash3 implementation as in the original C++
+struct MurmurHasher {
+    state: u64,
+}
+
+impl Default for MurmurHasher {
+    fn default() -> Self {
+        MurmurHasher { state: 0 }
     }
 }
 
-pub fn murmurhash3(key: u64) -> u64 {
-    let mut k: u64 = key as u64;
-    k ^= k >> 33;
-    k *= 0xff51afd7ed558ccd;
-    k ^= k >> 33;
-    k *= 0xc4ceb9fe1a85ec53;
-    k ^= k >> 33;
-    k
+impl Hasher for MurmurHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let k = u64::from_le_bytes(bytes.try_into().unwrap());
+
+        self.state ^= k >> 33;
+        self.state *= 0xff51afd7ed558ccd;
+        self.state ^= self.state >> 33;
+        self.state *= 0xc4ceb9fe1a85ec53;
+        self.state ^= self.state >> 33;
+    }
 }
