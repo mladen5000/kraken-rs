@@ -1,26 +1,23 @@
-use crate::build_db::DEFAULT_BLOCK_SIZE;
-use crate::build_db::DEFAULT_SUBBLOCK_SIZE;
-use crate::kv_store::murmurhash3;
-use crate::mmscanner::MinimizerScanner;
-use crate::mmscanner::BITS_PER_CHAR_DNA;
-use crate::mmscanner::BITS_PER_CHAR_PRO;
-use crate::mmscanner::CURRENT_REVCOM_VERSION;
-use crate::mmscanner::DEFAULT_SPACED_SEED_MASK;
-use crate::mmscanner::DEFAULT_TOGGLE_MASK;
-use crate::seqreader::BatchSequenceReader;
-use crate::seqreader::Sequence;
+use crate::{
+    build_db::DEFAULT_BLOCK_SIZE,
+    kv_store::murmurhash3,
+    mmscanner2::{MinimizerScanner, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO, DEFAULT_TOGGLE_MASK},
+    seqreader::{BatchSequenceReader, Sequence},
+};
 
-use std::collections::HashSet;
-use std::env;
-use std::io::{self, BufReader};
-use std::process;
+use std::{
+    collections::HashSet,
+    env,
+    io::{self, BufReader},
+    process,
+};
 
 const DEFAULT_N: usize = 4;
 const RANGE_SECTIONS: usize = 1024; // must be power of 2
 const RANGE_MASK: usize = RANGE_SECTIONS - 1; // must be power of 2
 const MAX_N: usize = RANGE_SECTIONS;
 
-struct Options {
+struct EstimateCapacityOptions {
     k: usize,
     l: usize,
     n: usize,
@@ -31,10 +28,10 @@ struct Options {
     toggle_mask: u64,
 }
 
-fn parse_command_line(args: &[String]) -> Options {
+fn parse_command_line(args: &[String]) -> EstimateCapacityOptions {
     const DEFAULT_SPACED_SEED_MASK: u64 = 0;
 
-    let mut opts = Options {
+    let mut opts = EstimateCapacityOptions {
         k: 0,
         l: 0,
         n: DEFAULT_N,
@@ -189,7 +186,7 @@ fn expand_spaced_seed_mask(spaced_seed_mask: &mut u64, bits_per_char: usize) {
     *spaced_seed_mask = new_mask;
 }
 
-fn process_sequence(seq: &str, opts: &Options, sets: &mut Vec<HashSet<u64>>) {
+fn process_sequence(seq: &str, opts: &EstimateCapacityOptions, sets: &mut Vec<HashSet<u64>>) {
     let mut scanner = MinimizerScanner::new(
         opts.k,
         opts.l,
@@ -214,7 +211,7 @@ fn process_sequence(seq: &str, opts: &Options, sets: &mut Vec<HashSet<u64>>) {
     }
 }
 
-fn process_sequences(opts: &Options) -> usize {
+fn process_sequences(opts: &EstimateCapacityOptions) -> usize {
     let mut sets: Vec<HashSet<u64>> = vec![HashSet::new(); opts.n];
 
     let stdin = io::stdin();

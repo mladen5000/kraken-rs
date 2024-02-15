@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process;
-pub const DEFAULT_BLOCK_SIZE: usize = (10 * 1024 * 1024);
+pub const DEFAULT_BLOCK_SIZE: usize = 10 * 1024 * 1024;
 pub const DEFAULT_SUBBLOCK_SIZE: usize = 1024;
 
 struct Options {
