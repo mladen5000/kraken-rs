@@ -1,302 +1,405 @@
-use crate::kv_store::murmurhash3;
+/*
+ * Copyright 2013-2023, Derrick Wood <dwood@cs.jhu.edu>
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
 
-use getopts::Options;
-use memmap2::MmapMut;
-use rayon::prelude::*; // Assuming memmap2 crate is used for memory mapping
+use crate::kraken2_data::TaxonCounts;
+use crate::kv_store::{murmur_hash3, HKey, HValue, KeyValueStore};
+use crate::mmap_file::MMapFile;
 
-use std::collections::HashMap;
-use std::env;
-use std::error::Error;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+
 use std::fs::File;
-use std::io;
-use std::path::Path;
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::{mem, ptr};
 
 const LOCK_ZONES: usize = 256;
 
-pub struct CompactHashCell {
+#[derive(Debug, Default)]
+struct CompactHashCell {
     data: u32,
 }
 
 impl CompactHashCell {
-    fn hashed_key(&self, value_bits: usize) -> u64 {
-        (self.data as u64) >> value_bits
+    fn hashed_key(&self, value_bits: usize) -> HKey {
+        (self.data >> value_bits) as HKey
     }
 
-    fn value(&self, value_bits: usize) -> u64 {
-        self.data as u64 & ((1 << value_bits) - 1)
+    fn value(&self, value_bits: usize) -> HValue {
+        (self.data & ((1 << value_bits) - 1)) as HValue
     }
 
-    fn populate(
-        &mut self,
-        compacted_key: u64,
-        val: u64,
-        key_bits: usize,
-        value_bits: usize,
-    ) -> Result<(), Box<dyn Error>> {
+    fn populate(&mut self, compacted_key: HKey, val: HValue, key_bits: usize, value_bits: usize) {
         if key_bits + value_bits != 32 {
-            return Err("key len and value len don't sum to 32".into());
+            panic!(
+                "key len of {} and value len of {} don't sum to 32",
+                key_bits, value_bits
+            );
         }
         if key_bits == 0 || value_bits == 0 {
-            return Err("key len and value len must be nonzero".into());
+            panic!("key len and value len must be nonzero");
         }
-        let max_value = (1 << value_bits) - 1;
-        if max_value < val {
-            return Err("value len too small for value".into());
+        let max_value = (1u64 << value_bits) - 1;
+        if max_value < val as u64 {
+            panic!("value len of {} too small for value of {}", value_bits, val);
         }
-        self.data = (compacted_key << value_bits) as u32;
-        self.data |= val as u32;
-        Ok(())
+        self.data = ((compacted_key as u32) << value_bits) | (val as u32);
     }
 }
 
-struct CompactHashTable {
+pub struct CompactHashTable {
     capacity: usize,
     size: AtomicUsize,
     key_bits: usize,
     value_bits: usize,
-    table: Vec<Arc<Mutex<CompactHashCell>>>, // Use Arc for shared ownership across threads
+    table: Vec<CompactHashCell>,
     file_backed: bool,
-    locks: Vec<Mutex<()>>, // Replacing omp_lock_t with Mutex
-    mmap: Option<MmapMut>, // Optional memory-mapped file backing
+    locks_initialized: bool,
+    backing_file: Option<MMapFile>,
+    zone_locks: Vec<Mutex<()>>,
 }
 
 impl CompactHashTable {
-    pub fn new(capacity: usize, key_bits: usize, value_bits: usize) -> io::Result<Self> {
-        let table = (0..capacity)
-            .map(|_| Arc::new(Mutex::new(CompactHashCell { data: 0 })))
+    pub fn new(capacity: usize, key_bits: usize, value_bits: usize) -> Self {
+        if key_bits + value_bits != mem::size_of::<CompactHashCell>() * 8 {
+            panic!(
+                "sum of key bits and value bits must equal {}",
+                mem::size_of::<CompactHashCell>() * 8
+            );
+        }
+        if key_bits == 0 {
+            panic!("key bits cannot be zero");
+        }
+        if value_bits == 0 {
+            panic!("value bits cannot be zero");
+        }
+        let mut table = Vec::with_capacity(capacity);
+        table.resize_with(capacity, CompactHashCell::default);
+        let zone_locks = std::iter::repeat_with(|| Mutex::new(()))
+            .take(LOCK_ZONES)
             .collect();
-        let locks = (0..LOCK_ZONES).map(|_| Mutex::new(())).collect();
-
-        Ok(Self {
+        Self {
             capacity,
             size: AtomicUsize::new(0),
             key_bits,
             value_bits,
             table,
             file_backed: false,
-            locks,
-            mmap: None,
-        })
-    }
-
-    pub fn with_file<P: AsRef<Path>>(
-        path: P,
-        capacity: usize,
-        key_bits: usize,
-        value_bits: usize,
-    ) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
-        // Further setup based on the file's contents
-
-        Ok(Self {
-            capacity,
-            size: AtomicUsize::new(0), // Change the type to AtomicUsize
-            key_bits,
-            value_bits,
-            table: vec![], // Initialize properly based on mmap and capacity
-            file_backed: true,
-            locks: (0..LOCK_ZONES).map(|_| Mutex::new(())).collect(),
-            mmap: Some(mmap),
-        })
-    }
-
-    pub fn get(&self, key: u64) -> Option<u64> {
-        let hc = murmurhash3(key);
-        let compacted_key = hc >> (32 + self.value_bits);
-        let mut idx = (hc % self.capacity as u64) as usize;
-        let first_idx = idx;
-        let mut step = 0;
-
-        loop {
-            let cell = self.table[idx].lock().unwrap();
-            if cell.value(self.value_bits) == 0 {
-                // Value of 0 means data is 0, saves work
-                break None;
-            }
-            if cell.hashed_key(self.value_bits) == compacted_key {
-                return Some(cell.value(self.value_bits));
-            }
-            if step == 0 {
-                step = self.second_hash(hc) as usize;
-            }
-            idx = (idx + step) % self.capacity;
-            if idx == first_idx {
-                break None; // Search over, we've exhausted the table
-            }
+            locks_initialized: true,
+            backing_file: None,
+            zone_locks,
         }
     }
-    pub fn find_index(&self, key: u64) -> Option<usize> {
-        let hc = murmurhash3(key);
-        let compacted_key = hc >> (32 + self.value_bits);
-        let mut idx = (hc % self.capacity as u64) as usize;
-        let first_idx = idx;
-        let mut step = 0;
 
-        loop {
-            let cell = self.table[idx].lock().unwrap();
-            if cell.value(self.value_bits) == 0 {
-                return None;
-            }
-            if cell.hashed_key(self.value_bits) == compacted_key {
-                return Some(idx);
-            }
-            if step == 0 {
-                step = self.second_hash(hc) as usize;
-            }
-            idx = (idx + step) % self.capacity;
-            if idx == first_idx {
-                break None;
-            }
+    pub fn from_file(filename: &str, memory_mapping: bool) -> Self {
+        let mut cht = Self::default();
+        cht.load_table(filename, memory_mapping);
+        cht
+    }
+
+    fn default() -> Self {
+        Self {
+            capacity: 0,
+            size: AtomicUsize::new(0),
+            key_bits: 0,
+            value_bits: 0,
+            table: Vec::new(),
+            file_backed: false,
+            locks_initialized: false,
+            backing_file: None,
+            zone_locks: Vec::new(),
         }
     }
-    pub fn compare_and_set(&self, key: u64, new_value: u64, old_value: &mut u64) -> bool {
+
+    fn load_table(&mut self, filename: &str, memory_mapping: bool) {
+        self.locks_initialized = false;
+        if memory_mapping {
+            let mut backing_file = MMapFile::new();
+            backing_file.open_file(filename, usize::MAX);
+            let ptr = backing_file.fptr();
+            let mut offset = 0;
+            self.capacity = unsafe { *(ptr.add(offset) as *const usize) };
+            offset += mem::size_of::<usize>();
+            self.size = AtomicUsize::new(unsafe { *(ptr.add(offset) as *const usize) });
+            offset += mem::size_of::<usize>();
+            self.key_bits = unsafe { *(ptr.add(offset) as *const usize) };
+            offset += mem::size_of::<usize>();
+            self.value_bits = unsafe { *(ptr.add(offset) as *const usize) };
+            offset += mem::size_of::<usize>();
+            self.table = unsafe {
+                let slice = std::slice::from_raw_parts(
+                    ptr.add(offset) as *const CompactHashCell,
+                    self.capacity,
+                );
+                (0..self.capacity).map(|i| ptr::read(&slice[i])).collect()
+            };
+            if backing_file.filesize() - offset != mem::size_of::<CompactHashCell>() * self.capacity
+            {
+                panic!("Capacity mismatch in {}, aborting", filename);
+            }
+            self.file_backed = true;
+            self.backing_file = Some(backing_file);
+        } else {
+            let mut file = File::open(filename).unwrap();
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut self.capacity as *mut usize as *mut u8,
+                    mem::size_of::<usize>(),
+                )
+            })
+            .unwrap();
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut self.size as *mut AtomicUsize as *mut u8,
+                    mem::size_of::<usize>(),
+                )
+            })
+            .unwrap();
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut self.key_bits as *mut usize as *mut u8,
+                    mem::size_of::<usize>(),
+                )
+            })
+            .unwrap();
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut self.value_bits as *mut usize as *mut u8,
+                    mem::size_of::<usize>(),
+                )
+            })
+            .unwrap();
+            self.table = Vec::with_capacity(self.capacity);
+            for _ in 0..self.capacity {
+                self.table.push(CompactHashCell { data: 0 });
+            }
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.table.as_mut_ptr() as *mut u8,
+                    mem::size_of::<CompactHashCell>() * self.capacity,
+                )
+            })
+            .unwrap();
+            self.file_backed = false;
+        }
+    }
+
+    pub fn write_table(&self, filename: &str) {
+        let mut file = File::create(filename).unwrap();
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.capacity as *const usize as *const u8,
+                mem::size_of::<usize>(),
+            )
+        })
+        .unwrap();
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.size as *const AtomicUsize as *const u8,
+                mem::size_of::<usize>(),
+            )
+        })
+        .unwrap();
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.key_bits as *const usize as *const u8,
+                mem::size_of::<usize>(),
+            )
+        })
+        .unwrap();
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.value_bits as *const usize as *const u8,
+                mem::size_of::<usize>(),
+            )
+        })
+        .unwrap();
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                self.table.as_ptr() as *const u8,
+                mem::size_of::<CompactHashCell>() * self.capacity,
+            )
+        })
+        .unwrap();
+    }
+
+    fn second_hash(first_hash: u64) -> u64 {
+        // Linear probing
+        1
+    }
+
+    pub fn get_value_counts(&self) -> TaxonCounts {
+        let mut value_counts = TaxonCounts::new();
+        let num_threads = num_cpus::get();
+        let mut thread_value_counts = vec![TaxonCounts::new(); num_threads];
+        let value_bits = self.value_bits;
+
+        rayon::iter::IndexedParallelIterator::enumerate(self.table.par_iter()).for_each(
+            |(i, cell)| {
+                let val = cell.value(value_bits);
+                if val != 0 {
+                    thread_value_counts[i % num_threads]
+                        .entry(val.into())
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                }
+            },
+        );
+        for thread_counts in thread_value_counts {
+            for (val, count) in thread_counts {
+                value_counts
+                    .entry(val)
+                    .and_modify(|c| *c += count)
+                    .or_insert(count);
+            }
+        }
+        value_counts
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn size(&self) -> usize {
+        self.size.load(Ordering::SeqCst)
+    }
+
+    pub fn key_bits(&self) -> usize {
+        self.key_bits
+    }
+
+    pub fn value_bits(&self) -> usize {
+        self.value_bits
+    }
+
+    pub fn occupancy(&self) -> f64 {
+        self.size() as f64 / self.capacity as f64
+    }
+
+    fn find_index(&self, key: HKey, idx: &mut usize) -> bool {
+        let hc = murmur_hash3(key);
+        let compacted_key = hc >> (32 + self.value_bits);
+        *idx = (hc % self.capacity as u64) as usize;
+        let first_idx = *idx;
+        let mut step = 0;
+        loop {
+            if self.table[*idx].value(self.value_bits) == 0 {
+                return false;
+            }
+            if self.table[*idx].hashed_key(self.value_bits) == compacted_key {
+                return true;
+            }
+            if step == 0 {
+                step = Self::second_hash(hc);
+            }
+            *idx += step as usize;
+            *idx %= self.capacity;
+            if *idx == first_idx {
+                break;
+            }
+        }
+        false
+    }
+
+    fn compare_and_set(&self, key: HKey, new_value: HValue, old_value: &mut HValue) -> bool {
         if self.file_backed {
             return false;
         }
         if new_value == 0 {
             return false;
         }
-
-        let hc = murmurhash3(key);
+        let hc = murmur_hash3(key);
         let compacted_key = hc >> (32 + self.value_bits);
         let mut idx = (hc % self.capacity as u64) as usize;
+        let first_idx = idx;
+        let mut step = 0;
         let mut set_successful = false;
-
-        let zone = idx % LOCK_ZONES;
-        let _lock = self.locks[zone].lock().unwrap(); // Lock the corresponding zone for thread safety
-
-        {
-            let cell = &mut *self.table[idx].lock().unwrap(); // Lock the cell for exclusive access
-
-            if *old_value == cell.value(self.value_bits) {
-                cell.populate(compacted_key, new_value, self.key_bits, self.value_bits);
-                if *old_value == 0 {
-                    self.size.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    // Safely increment size, assuming `size` is an `AtomicUsize`
+        let mut search_successful = false;
+        while !search_successful {
+            let zone = idx % LOCK_ZONES;
+            let _lock = self.zone_locks[zone].lock().unwrap();
+            if self.table[idx].value(self.value_bits) == 0
+                || self.table[idx].hashed_key(self.value_bits) == compacted_key
+            {
+                search_successful = true;
+                if *old_value == self.table[idx].value(self.value_bits) {
+                    self.table[idx].populate(
+                        compacted_key,
+                        new_value,
+                        self.key_bits,
+                        self.value_bits,
+                    );
+                    if *old_value == 0 {
+                        self.size.fetch_add(1, Ordering::SeqCst);
+                    }
+                    set_successful = true;
+                } else {
+                    *old_value = self.table[idx].value(self.value_bits);
                 }
-                *old_value = cell.value(self.value_bits); // Update the old value to the new value
-                set_successful = true;
-            } else {
-                *old_value = cell.value(self.value_bits); // Update old_value if the comparison fails
+            }
+            if step == 0 {
+                step = Self::second_hash(hc);
+            }
+            idx += step as usize;
+            idx %= self.capacity;
+            if idx == first_idx {
+                panic!("compact hash table capacity exceeded");
             }
         }
-
         set_successful
     }
 
-    pub fn direct_compare_and_set(
+    fn direct_compare_and_set(
         &self,
         idx: usize,
-        key: u64,
-        new_value: u64,
-        old_value: &mut u64,
+        key: HKey,
+        new_value: HValue,
+        old_value: &mut HValue,
     ) -> bool {
-        let hc = murmurhash3(key);
+        let hc = murmur_hash3(key);
         let compacted_key = hc >> (32 + self.value_bits);
+        let mut set_successful = false;
         let zone = idx % LOCK_ZONES;
-        let _lock = self.locks[zone].lock().unwrap(); // Lock the corresponding zone
-
-        let mut cell = self.table[idx].lock().unwrap();
-        if *old_value == cell.value(self.value_bits) {
-            cell.populate(compacted_key, new_value, self.key_bits, self.value_bits);
+        let _lock = self.zone_locks[zone].lock().unwrap();
+        if *old_value == self.table[idx].value(self.value_bits) {
+            self.table[idx].populate(compacted_key, new_value, self.key_bits, self.value_bits);
             if *old_value == 0 {
-                // Assuming size is an AtomicUsize
-                self.size.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.size.fetch_add(1, Ordering::SeqCst);
             }
-            *old_value = cell.value(self.value_bits);
-            true
+            set_successful = true;
         } else {
-            *old_value = cell.value(self.value_bits);
-            false
+            *old_value = self.table[idx].value(self.value_bits);
         }
-    }
-
-    pub fn get_value_counts(&self) -> HashMap<u64, usize> {
-        let value_counts: HashMap<u64, usize> = self
-            .table
-            .par_iter()
-            .map(|cell| {
-                let cell = cell.lock().unwrap();
-                let value = cell.value(self.value_bits);
-                if value != 0 {
-                    Some((value, 1))
-                } else {
-                    None
-                }
-            })
-            .filter_map(|x| x)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .fold(HashMap::new(), |mut acc, (val, count)| {
-                *acc.entry(val).or_insert(0) += count;
-                acc
-            });
-        value_counts
-    }
-    fn second_hash(&self, first_hash: u64) -> u64 {
-        #[cfg(feature = "linear_probing")]
-        let hash_value = 1;
-
-        #[cfg(not(feature = "linear_probing"))]
-        let hash_value = (first_hash >> 8) | 1;
-
-        hash_value
+        set_successful
     }
 }
 
-struct CmdOptions {
-    hashtable_filename: String,
-    taxonomy_filename: String,
-    options_filename: String,
-    output_filename: String,
-    use_mpa_style: bool,
-    report_zeros: bool,
-    skip_counts: bool,
-    num_threads: u32,
-}
-
-fn print_usage(program: &str, opts: Options) {
-    let brief = format!("Usage: {} FILE [options]", program);
-    print!("{}", opts.usage(&brief));
-}
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let program = args[0].clone();
-
-    let mut opts = Options::new();
-    opts.optopt("H", "", "set hashtable filename", "NAME");
-    opts.optopt("t", "", "set taxonomy filename", "NAME");
-    opts.optopt("o", "", "set options filename", "NAME");
-    opts.optopt("O", "", "set output filename", "NAME");
-    opts.optflag("m", "", "use MPA style output");
-    opts.optflag("z", "", "report zeros");
-    opts.optflag("s", "", "skip counts");
-    opts.optopt("p", "", "set number of threads", "NUM");
-    opts.optflag("h", "", "print this help menu");
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => {
-            panic!("{}", f)
+impl KeyValueStore for CompactHashTable {
+    fn get(&self, key: HKey) -> HValue {
+        let hc = murmur_hash3(key);
+        let compacted_key = hc >> (32 + self.value_bits);
+        let mut idx = (hc % self.capacity as u64) as usize;
+        let first_idx = idx;
+        let mut step = 0;
+        loop {
+            if self.table[idx].value(self.value_bits) == 0 {
+                break;
+            }
+            if self.table[idx].hashed_key(self.value_bits) == compacted_key {
+                return self.table[idx].value(self.value_bits);
+            }
+            if step == 0 {
+                step = Self::second_hash(hc);
+            }
+            idx += step as usize;
+            idx %= self.capacity;
+            if idx == first_idx {
+                break;
+            }
         }
-    };
-    if matches.opt_present("h") {
-        print_usage(&program, opts);
-        return;
+        0
     }
-    let cmd_opts = CmdOptions {
-        hashtable_filename: matches.opt_str("H").unwrap(),
-        taxonomy_filename: matches.opt_str("t").unwrap(),
-        options_filename: matches.opt_str("o").unwrap(),
-        output_filename: matches.opt_str("O").unwrap_or("/dev/fd/1".to_string()),
-        use_mpa_style: matches.opt_present("m"),
-        report_zeros: matches.opt_present("z"),
-        skip_counts: matches.opt_present("s"),
-        num_threads: matches.opt_get_default("p", 1).unwrap(),
-    };
-
-    // Rest of your code here...
 }

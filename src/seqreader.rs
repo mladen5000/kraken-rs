@@ -1,261 +1,477 @@
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+/*
+ * Copyright 2013-2023, Derrick Wood <dwood@cs.jhu.edu>
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
 
-/// Removes trailing whitespace from a string.
-pub fn strip_string(str: &mut String) {
-    while str.ends_with(char::is_whitespace) {
-        str.pop();
-    }
-}
+use std::io::{BufRead, Cursor, Read};
+use std::str::from_utf8;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(PartialEq, PartialOrd, Copy, Clone, Debug)]
 pub enum SequenceFormat {
     AutoDetect,
     Fasta,
     Fastq,
 }
-/// Represents a biological sequence with its format, id, sequence data, and quality scores.
+
+#[derive(PartialEq, PartialOrd, Clone, Debug)]
 pub struct Sequence {
     pub format: SequenceFormat,
+    pub header: String,
     pub id: String,
     pub seq: String,
     pub quals: String,
+    str_representation: String,
 }
 
 impl Sequence {
     pub fn new() -> Self {
         Sequence {
             format: SequenceFormat::AutoDetect,
-            id: String::new(),
-            seq: String::new(),
-            quals: String::new(),
+            header: "".to_string(),
+            id: "".to_string(),
+            seq: "".to_string(),
+            quals: "".to_string(),
+            str_representation: "".to_string(),
         }
     }
+    pub fn to_string(&mut self) -> &str {
+        self.str_representation.clear();
+        self.str_representation.push_str(&self.header);
 
-    /// Converts the sequence to a string representation based on its format.
-    pub fn to_string(&self) -> String {
-        let mut repr = self.id.clone();
-        repr.push('\n');
-        repr.push_str(&self.seq);
         match self.format {
             SequenceFormat::Fastq => {
-                repr.push_str("\n+\n");
-                repr.push_str(&self.quals);
-            }
-            _ => {}
-        }
-        repr.push('\n');
-        repr
-    }
-}
-
-/// Specifies the format of the sequence (FASTA, FASTQ, or auto-detection).
-
-/// Reads sequences in batches from a file or stream.
-pub struct BatchSequenceReader<R: BufRead> {
-    reader: R,
-    format: SequenceFormat,
-}
-
-impl<R: BufRead> BatchSequenceReader<R> {
-    pub fn new(reader: R) -> Self {
-        BatchSequenceReader {
-            reader,
-            format: SequenceFormat::AutoDetect,
-        }
-    }
-
-    /// Loads a block of data from the input stream.
-    pub fn load_block(&mut self, block_size: usize) -> io::Result<()> {
-        let mut block = vec![0; block_size];
-        let bytes_read = self.reader.read(&mut block)?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
-
-        // Process block here...
-
-        Ok(())
-    }
-
-    /// Loads a batch of sequences from the input stream.
-    pub fn load_batch(&mut self, record_count: usize) -> io::Result<Vec<Sequence>> {
-        let mut sequences = Vec::new();
-
-        for _ in 0..record_count {
-            if let Some(sequence) = self.next_sequence()? {
-                sequences.push(sequence);
-            } else {
-                break; // End of stream reached.
-            }
-        }
-
-        Ok(sequences)
-    }
-    // Existing methods...
-
-    /// Reads the next sequence from the given input stream.
-    pub fn read_next_sequence<B: BufRead>(
-        reader: &mut R,
-        file_format: &mut SequenceFormat,
-    ) -> io::Result<Option<Sequence>> {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(None); // End of input stream.
-        }
-
-        // Detect file format if set to AutoDetect.
-        match file_format {
-            SequenceFormat::AutoDetect => {
-                *file_format = match line.chars().next() {
-                    Some('@') => SequenceFormat::Fastq,
-                    Some('>') => SequenceFormat::Fasta,
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Unrecognized file format",
-                        ))
-                    }
-                };
-            }
-            _ => {}
-        }
-
-        let mut sequence = Sequence::new();
-        sequence.format = file_format.clone();
-        sequence.id = line.trim_end().to_string();
-
-        match file_format {
-            SequenceFormat::Fasta => {
-                sequence.seq.clear();
-                while reader.read_line(&mut line)? != 0 {
-                    if line.starts_with('>') {
-                        break; // Start of next sequence.
-                    }
-                    sequence.seq.push_str(line.trim_end());
-                }
-            }
-            SequenceFormat::Fastq => {
-                // Read sequence line.
-                line.clear();
-                if reader.read_line(&mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Incomplete FASTQ record",
-                    ));
-                }
-                sequence.seq = line.trim_end().to_string();
-
-                // Skip plus line and read quality scores.
-                line.clear();
-                reader.read_line(&mut line)?;
-                line.clear();
-                if reader.read_line(&mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Incomplete FASTQ record",
-                    ));
-                }
-                sequence.quals = line.trim_end().to_string();
-            }
-            SequenceFormat::AutoDetect => todo!(),
-        }
-
-        Ok(Some(sequence))
-    }
-
-    /// Reads the next sequence from the stream.
-    pub fn next_sequence(&mut self) -> io::Result<Option<Sequence>> {
-        let mut line = String::new();
-
-        // Detect file format if not already known.
-        match self.format {
-            SequenceFormat::AutoDetect => {
-                if self.reader.read_line(&mut line)? == 0 {
-                    return Ok(None);
-                }
-                self.format = match line.chars().next() {
-                    Some('@') => SequenceFormat::Fastq,
-                    Some('>') => SequenceFormat::Fasta,
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Unrecognized file format",
-                        ))
-                    }
-                };
+                self.str_representation.push_str("\n");
+                self.str_representation.push_str(&self.seq);
+                self.str_representation.push_str("\n+\n");
+                self.str_representation.push_str(&self.quals);
+                self.str_representation.push_str("\n");
             }
             _ => {
-                // Read the first line of the sequence (id).
-                if self.reader.read_line(&mut line)? == 0 {
-                    return Ok(None);
-                }
+                self.str_representation.push_str("\n");
+                self.str_representation.push_str(&self.seq);
+                self.str_representation.push_str("\n");
             }
         }
-        strip_string(&mut line);
 
-        let mut seq = Sequence::new();
-        seq.format = self.format.clone();
-        seq.id = line;
-
-        match self.format {
-            SequenceFormat::Fasta => {
-                while self.reader.read_line(&mut line)? != 0 {
-                    if line.starts_with('>') {
-                        break; // Next sequence id reached.
-                    }
-                    strip_string(&mut line);
-                    seq.seq.push_str(&line);
-                    line.clear();
-                }
-            }
-            SequenceFormat::Fastq => {
-                // Read sequence line.
-                if self.reader.read_line(&mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Incomplete FASTQ record",
-                    ));
-                }
-                strip_string(&mut line);
-                seq.seq = line;
-
-                // Skip plus line.
-                line.clear();
-                if self.reader.read_line(&mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Incomplete FASTQ record",
-                    ));
-                }
-
-                // Read quality scores.
-                line.clear();
-                if self.reader.read_line(&mut line)? == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "Incomplete FASTQ record",
-                    ));
-                }
-                strip_string(&mut line);
-                seq.quals = line;
-            }
-            SequenceFormat::AutoDetect => todo!(),
-        }
-
-        Ok(Some(seq))
+        &self.str_representation
     }
 }
 
-// Usage example:
-fn main() -> io::Result<()> {
-    let file = File::open("sequences.fasta")?;
-    let reader = BufReader::new(file);
-    let mut seq_reader = BatchSequenceReader::new(reader);
+pub struct BatchSequenceReader {
+    // Sequence buffer
+    ss: Vec<u8>,
+    // String buffer
+    str_buffer: String,
+    // File format
+    file_format: SequenceFormat,
+    // Block buffer
+    block_buffer: Vec<u8>,
+}
 
-    while let Some(sequence) = seq_reader.next_sequence()? {
-        println!("{}", sequence.to_string());
+impl BatchSequenceReader {
+    pub fn new() -> Self {
+        BatchSequenceReader {
+            ss: Vec::with_capacity(8192),
+            str_buffer: String::with_capacity(8192),
+            file_format: SequenceFormat::AutoDetect,
+            block_buffer: vec![0; 8192],
+        }
     }
 
-    Ok(())
+    pub fn load_block<R: BufRead>(&mut self, ifs: &mut R, block_size: usize) -> bool {
+        self.ss.clear();
+
+        if self.block_buffer.len() < block_size {
+            self.block_buffer.resize(block_size, 0);
+        }
+
+        let bytes_read = ifs.read(&mut self.block_buffer[..block_size]).unwrap_or(0);
+        if bytes_read == 0 {
+            return false;
+        }
+
+        if self.file_format == SequenceFormat::AutoDetect {
+            match self.block_buffer[0] {
+                b'@' => self.file_format = SequenceFormat::Fastq,
+                b'>' => self.file_format = SequenceFormat::Fasta,
+                _ => panic!("sequence reader - unrecognized file format"),
+            }
+        }
+
+        self.str_buffer.clear();
+        self.str_buffer
+            .push_str(from_utf8(&self.block_buffer[..bytes_read]).unwrap());
+        self.ss.extend_from_slice(self.str_buffer.as_bytes());
+
+        if let Some(line) = ifs.lines().next() {
+            self.str_buffer.clear();
+            self.str_buffer.push_str(&line.unwrap());
+            self.str_buffer.push_str("\n");
+            self.ss.extend_from_slice(self.str_buffer.as_bytes());
+        }
+
+        if self.file_format == SequenceFormat::Fastq {
+            while let Some(line) = ifs.lines().next() {
+                self.str_buffer.clear();
+                self.str_buffer.push_str(&line.unwrap());
+                self.str_buffer.push_str("\n");
+                self.ss.extend_from_slice(self.str_buffer.as_bytes());
+                if self.str_buffer.as_bytes()[0] == b'@' {
+                    break;
+                }
+            }
+
+            let lines_to_read;
+            if let Some(line) = ifs.lines().next() {
+                self.str_buffer.clear();
+                self.str_buffer.push_str(&line.unwrap());
+                self.str_buffer.push_str("\n");
+                self.ss.extend_from_slice(self.str_buffer.as_bytes());
+                lines_to_read = if self.str_buffer.as_bytes()[0] == b'@' {
+                    3
+                } else {
+                    2
+                };
+                for _ in 0..lines_to_read {
+                    if let Some(line) = ifs.lines().next() {
+                        self.str_buffer.clear();
+                        self.str_buffer.push_str(&line.unwrap());
+                        self.str_buffer.push_str("\n");
+                        self.ss.extend_from_slice(self.str_buffer.as_bytes());
+                    }
+                }
+            }
+        } else {
+            while let Some(byte) = ifs.bytes().next() {
+                if byte.unwrap() == b'>' {
+                    break;
+                }
+                if let Some(line) = ifs.lines().next() {
+                    self.str_buffer.clear();
+                    self.str_buffer.push_str(&line.unwrap());
+                    self.str_buffer.push_str("\n");
+                    self.ss.extend_from_slice(self.str_buffer.as_bytes());
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn load_batch<R: BufRead>(&mut self, ifs: &mut R, record_count: usize) -> bool {
+        self.ss.clear();
+
+        let mut valid = false;
+        if self.file_format == SequenceFormat::AutoDetect {
+            if let Some(byte) = ifs.bytes().next() {
+                match byte.unwrap() {
+                    b'@' => self.file_format = SequenceFormat::Fastq,
+                    b'>' => self.file_format = SequenceFormat::Fasta,
+                    _ => panic!("sequence reader - unrecognized file format"),
+                }
+                valid = true;
+            } else {
+                return false;
+            }
+        }
+
+        let mut line_count = 0;
+        let mut remaining_record_count = record_count;
+        while remaining_record_count > 0 {
+            if let Some(line) = ifs.lines().next() {
+                self.str_buffer.clear();
+                self.str_buffer.push_str(&line.unwrap());
+                self.str_buffer.push_str("\n");
+                self.ss.extend_from_slice(self.str_buffer.as_bytes());
+                line_count += 1;
+                valid = true;
+
+                if self.file_format == SequenceFormat::Fastq {
+                    if line_count % 4 == 0 {
+                        remaining_record_count -= 1;
+                    }
+                } else {
+                    if let Some(byte) = ifs.bytes().next() {
+                        if byte.unwrap() == b'>' {
+                            remaining_record_count -= 1;
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        valid
+    }
+
+    pub fn next_sequence(&mut self, seq: &mut Sequence) -> bool {
+        let mut cursor = Cursor::new(&mut self.ss);
+        let result = BatchSequenceReader::read_next_sequence(
+            &mut cursor, // input stream
+            seq,
+            &mut self.str_buffer,
+            self.file_format,
+        );
+
+        if result {
+            let pos = cursor.position() as usize;
+            self.ss.drain(..pos);
+        }
+
+        result
+    }
+
+    /// Read the next sequence from the input stream
+    pub fn read_next_sequence<R: BufRead>(
+        is: &mut R, // input stream
+        seq: &mut Sequence,
+        str_buffer: &mut String,
+        file_format: SequenceFormat,
+    ) -> bool {
+        // str_buffer.clear();
+        println!("{}", str_buffer.len());
+
+        if is.read_line(str_buffer).unwrap() == 0 {
+            return false;
+        }
+        strip_string(str_buffer);
+
+        let mut format = file_format;
+        if format == SequenceFormat::AutoDetect {
+            match str_buffer.as_bytes()[0] {
+                b'@' => format = SequenceFormat::Fastq,
+                b'>' => format = SequenceFormat::Fasta,
+                _ => panic!("sequence reader - unrecognized file format"),
+            }
+        }
+
+        seq.format = format;
+        if seq.format == SequenceFormat::Fastq {
+            if str_buffer.is_empty() {
+                return false;
+            }
+            if str_buffer.as_bytes()[0] != b'@' {
+                panic!(
+                    "malformed FASTQ file (exp. '@', saw \"{}\"), aborting",
+                    str_buffer
+                );
+            }
+        } else if seq.format == SequenceFormat::Fasta {
+            if str_buffer.as_bytes()[0] != b'>' {
+                panic!(
+                    "malformed FASTA file (exp. '>', saw \"{}\"), aborting",
+                    str_buffer
+                );
+            }
+        } else {
+            panic!("illegal sequence format encountered in parsing");
+        }
+
+        seq.header.clear();
+        seq.header.push_str(str_buffer);
+
+        let first_whitespace_ch = str_buffer
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(str_buffer.len());
+        let substr_len = if first_whitespace_ch > 1 {
+            first_whitespace_ch // - 1
+        } else {
+            str_buffer.len() - 1
+        };
+
+        if substr_len > 0 {
+            seq.id.clear();
+            seq.id.push_str(&str_buffer[1..=substr_len]);
+        } else {
+            seq.id.clear();
+        }
+
+        seq.seq.clear();
+        if seq.format == SequenceFormat::Fasta {
+            while let Ok(bytes_read) = is.read_line(str_buffer) {
+                if bytes_read == 0 || str_buffer.starts_with('>') {
+                    break;
+                }
+                strip_string(str_buffer);
+                seq.seq.push_str(str_buffer);
+                str_buffer.clear();
+            }
+        } else if seq.format == SequenceFormat::Fastq {
+            if is.read_line(str_buffer).unwrap() == 0 {
+                return false;
+            }
+            strip_string(str_buffer);
+            seq.seq.push_str(str_buffer);
+
+            if is.read_line(str_buffer).unwrap() == 0 {
+                return false;
+            }
+
+            if is.read_line(str_buffer).unwrap() == 0 {
+                return false;
+            }
+            strip_string(str_buffer);
+            seq.quals.clear();
+            seq.quals.push_str(str_buffer);
+        }
+
+        true
+    }
+    pub fn file_format(&self) -> SequenceFormat {
+        self.file_format
+    }
+}
+
+fn strip_string(str: &mut String) {
+    if str.is_empty() {
+        return;
+    }
+    while let Some(c) = str.pop() {
+        if !c.is_whitespace() {
+            str.push(c);
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_sequence_to_string() {
+        let mut seq = Sequence {
+            format: SequenceFormat::Fasta,
+            header: ">seq1".to_string(),
+            id: "seq1".to_string(),
+            seq: "ATCG".to_string(),
+            quals: "".to_string(),
+            str_representation: "".to_string(),
+        };
+        assert_eq!(seq.to_string(), ">seq1\nATCG\n");
+
+        seq.format = SequenceFormat::Fastq;
+        seq.quals = "!@#$".to_string();
+        assert_eq!(seq.to_string(), ">seq1\nATCG\n+\n!@#$\n");
+    }
+
+    #[test]
+    fn test_load_block_fasta() {
+        let fasta_data = b">seq1\nATCG\n>seq2\nTGCA\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fasta_data);
+        assert!(reader.load_block(&mut cursor, fasta_data.len()));
+        assert_eq!(reader.file_format(), SequenceFormat::Fasta);
+    }
+
+    #[test]
+    fn test_load_block_fastq() {
+        let fastq_data = b"@seq1\nATCG\n+\n!@#$\n@seq2\nTGCA\n+\n$#@!\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fastq_data);
+        assert!(reader.load_block(&mut cursor, fastq_data.len()));
+        assert_eq!(reader.file_format(), SequenceFormat::Fastq);
+    }
+
+    #[test]
+    fn test_load_batch_fasta() {
+        let fasta_data = b">seq1\nATCG\n>seq2\nTGCA\n>seq3\nGCAT\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fasta_data);
+        assert!(reader.load_batch(&mut cursor, 2));
+        assert_eq!(reader.file_format(), SequenceFormat::Fasta);
+    }
+
+    #[test]
+    fn test_load_batch_fastq() {
+        let fastq_data = b"@seq1\nATCG\n+\n!@#$\n@seq2\nTGCA\n+\n$#@!\n@seq3\nGCAT\n+\n!@#$\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fastq_data);
+        assert!(reader.load_batch(&mut cursor, 2));
+        assert_eq!(reader.file_format(), SequenceFormat::Fastq);
+    }
+
+    #[test]
+    fn test_next_sequence_fasta() {
+        let fasta_data = b">seq1\nATCG\n>seq2\nTGCA\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fasta_data);
+        reader.load_block(&mut cursor, fasta_data.len());
+
+        let mut seq = Sequence {
+            format: SequenceFormat::AutoDetect,
+            header: "".to_string(),
+            id: "".to_string(),
+            seq: "".to_string(),
+            quals: "".to_string(),
+            str_representation: "".to_string(),
+        };
+
+        assert!(reader.next_sequence(&mut seq));
+        assert_eq!(seq.format, SequenceFormat::Fasta);
+        assert_eq!(seq.header, ">seq1");
+        assert_eq!(seq.id, "seq1");
+        assert_eq!(seq.seq, "ATCG");
+        assert_eq!(seq.quals, "");
+
+        assert!(reader.next_sequence(&mut seq));
+        assert_eq!(seq.format, SequenceFormat::Fasta);
+        assert_eq!(seq.header, ">seq2");
+        assert_eq!(seq.id, "seq2");
+        assert_eq!(seq.seq, "TGCA");
+        assert_eq!(seq.quals, "");
+
+        assert!(!reader.next_sequence(&mut seq));
+    }
+
+    #[test]
+    fn test_next_sequence_fastq() {
+        let fastq_data = b"@seq1\nATCG\n+\n!@#$\n@seq2\nTGCA\n+\n$#@!\n";
+        let mut reader = BatchSequenceReader::new();
+        let mut cursor = Cursor::new(fastq_data);
+        reader.load_block(&mut cursor, fastq_data.len());
+
+        let mut seq = Sequence {
+            format: SequenceFormat::AutoDetect,
+            header: "".to_string(),
+            id: "".to_string(),
+            seq: "".to_string(),
+            quals: "".to_string(),
+            str_representation: "".to_string(),
+        };
+
+        assert!(reader.next_sequence(&mut seq));
+        assert_eq!(seq.format, SequenceFormat::Fastq);
+        assert_eq!(seq.header, "@seq1");
+        assert_eq!(seq.id, "seq1");
+        assert_eq!(seq.seq, "ATCG");
+        assert_eq!(seq.quals, "!@#$");
+
+        assert!(reader.next_sequence(&mut seq));
+        assert_eq!(seq.format, SequenceFormat::Fastq);
+        assert_eq!(seq.header, "@seq2");
+        assert_eq!(seq.id, "seq2");
+        assert_eq!(seq.seq, "TGCA");
+        assert_eq!(seq.quals, "$#@!");
+
+        assert!(!reader.next_sequence(&mut seq));
+    }
+
+    #[test]
+    fn test_strip_string() {
+        let mut s1 = "  hello  ".to_string();
+        strip_string(&mut s1);
+        assert_eq!(s1, "  hello");
+
+        let mut s2 = "world  ".to_string();
+        strip_string(&mut s2);
+        assert_eq!(s2, "world");
+
+        let mut s3 = "".to_string();
+        strip_string(&mut s3);
+        assert_eq!(s3, "");
+    }
 }

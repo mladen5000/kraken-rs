@@ -1,8 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 struct ThreadPool {

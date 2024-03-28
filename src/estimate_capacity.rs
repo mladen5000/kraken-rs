@@ -1,7 +1,7 @@
 use crate::{kv_store::murmurhash3, mmscanner2::MinimizerScanner};
 use rayon::prelude::*;
 
-use std::{collections::HashSet, process::exit};
+use std::collections::HashSet;
 
 const DEFAULT_N: usize = 4;
 const RANGE_SECTIONS: usize = 1024; // must be power of 2
@@ -18,7 +18,7 @@ struct EstimateCapacityOptions {
     spaced_seed_mask: u64,
     toggle_mask: u64,
 }
-use clap::{Arg, Command, Parser};
+use clap::{Arg, Command};
 use std::sync::{Arc, Mutex};
 
 fn process_sequences(opts: &EstimateCapacityOptions) {

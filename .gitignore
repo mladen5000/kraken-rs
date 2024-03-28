@@ -28,3 +28,9 @@ firedbg/src/seqreader.rs.firedbg.map
 firedbg/src/taxonomy.rs.firedbg.map
 firedbg/src/threadpool.rs.firedbg.map
 firedbg/src/utilities.rs.firedbg.map
+firedbg/src/classify3.rs.firedbg.map
+firedbg/src/mmscanner2.rs.firedbg.map
+.DS_Store
+Cargo.lock
+Miniforge3-Darwin-arm64.sh
+kraken2

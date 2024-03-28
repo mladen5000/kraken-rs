@@ -1,7 +1,6 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom};
-use std::os::unix::io::AsRawFd;
-use std::os::unix::prelude::FileExt;
+use std::io;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,6 +16,19 @@ impl MMapFile {
         Self {
             mmap: None,
             file: None,
+        }
+    }
+    pub fn fptr(&self) -> *mut u8 {
+        match &self.mmap {
+            Some(mmap) => mmap.as_ptr() as *mut u8,
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    pub fn filesize(&self) -> usize {
+        match &self.mmap {
+            Some(mmap) => mmap.len(),
+            None => 0,
         }
     }
 

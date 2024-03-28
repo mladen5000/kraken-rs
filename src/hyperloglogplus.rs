@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::ops::{BitAnd, Shl};
 
 // Constants based on the provided C++ code
 const P_PRIME: u8 = 25;
@@ -11,23 +10,43 @@ type SparseListType = HashSet<u32>;
 fn clz(x: u64) -> u8 {
     x.leading_zeros() as u8
 }
+trait Bits {
+    const BITS: u32;
+}
 
-fn extract_bits<T: Copy + From<u8> + Shl<Output = T> + BitAnd<Output = T>>(
-    value: T,
-    hi: u8,
-    lo: u8,
-    shift_left: bool,
-) -> T {
-    // Implementation similar to the C++ code
-    let bitmask: T = (((T::from(1u8) << (hi - lo)) - T::from(1u8)) << lo).into();
-    let result = value & bitmask;
+impl Bits for u32 {
+    const BITS: u32 = 32;
+}
+fn extract_bits<T>(value: T, hi: u8, lo: u8, shift_left: bool) -> T
+where
+    T: From<u8>
+        + Into<u64>
+        + std::ops::BitAnd<Output = T> // Specify BitAnd with an appropriate Output type
+        + std::ops::BitOr<Output = T>
+        + std::ops::Shl<u8, Output = T>
+        + std::ops::Shr<u8, Output = T>
+        + std::ops::Sub<Output = T>
+        // Ensure Shl and Shr are specified with the correct RHS type and Output
+        + Copy, // Adding Copy trait for simplicity in operations
+{
+    // Validate hi and lo to ensure hi is greater than or equal to lo
+    assert!(hi >= lo, "hi must be greater than or equal to lo");
+
+    // Creating the bitmask as per the C++ logic
+    let bitmask: T = ((T::from(1u8) << (hi - lo + 1)) - T::from(1u8)) << lo;
+    let mut result: T = value & bitmask;
 
     if shift_left {
-        result << (std::mem::size_of::<T>() * 8 - hi) as usize
+        let shift_amount = (std::mem::size_of::<T>() * 8 - hi as usize - 1) as u8;
+        result = result << shift_amount;
     } else {
-        result >> lo as usize
+        result = result >> lo;
     }
+
+    result
 }
+
+// ... and similarly implement for u64, u8, etc.
 
 // HyperLogLogPlusMinus data structure
 pub struct HyperLogLogPlusMinus {
@@ -40,18 +59,43 @@ pub struct HyperLogLogPlusMinus {
     hash_function: fn(u64) -> u64, // Function pointer for the hash function
     pub use_n_observed: bool,
 }
+impl HyperLogLogPlusMinus {
+    // Constructor with default values
+    fn new(precision: u8, sparse: bool, bit_mixer: fn(u64) -> u64) -> Self {
+        Self {
+            p: precision,
+            m: 1 << precision,
+            registers: vec![0; 1 << precision],
+            sparse,
+            sparse_list: HashSet::new(),
+            hash_function: todo!(),
+            use_n_observed: todo!(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.sparse = true;
+        self.sparse_list.clear();
+        // Reset other fields as necessary
+    }
+
+    // Add item to the HyperLogLogPlusMinus
+    fn insert(&mut self, item: u64) {
+        // Implementation goes here
+    }
+}
 
 // Methods for sparse representation, bias correction, and improved estimators
 
 // Additional memod ertl_improved_estimator {
 
-fn sigma(x: f64) -> f64 {
+fn sigma(mut x: f64) -> f64 {
     /* Implementation here */
-    assert!(x);
+    assert!(x != 0.0);
     if x == 1.0 {
         return f64::INFINITY;
     }
-    let (prev_sigma_x, sigma_x, y) = (0.0, 0.0, 0.0);
+    let (mut prev_sigma_x, mut sigma_x, mut y) = (0.0, 0.0, 0.0);
 
     loop {
         prev_sigma_x = sigma_x;
@@ -67,7 +111,7 @@ fn sigma(x: f64) -> f64 {
 
 pub fn tau(mut x: f64) -> f64 {
     assert!(x >= 0.0 && x <= 1.0);
-    if (x == 0.0 || x == 1.0) {
+    if x == 0.0 || x == 1.0 {
         return 0.0;
     }
     let (mut prev_tau_x, mut y, mut tau_x) = (0.0, 1.0, 1.0 - x);
@@ -76,7 +120,7 @@ pub fn tau(mut x: f64) -> f64 {
         prev_tau_x = tau_x;
         x = x.sqrt();
         y /= 2.0;
-        tau_x -= (1 - x) * (1 - x) * y;
+        tau_x -= (1.0 - x) * (1.0 - x) * y;
         if tau_x == prev_tau_x {
             break;
         }
@@ -125,20 +169,6 @@ pub mod hash_functions {
 // Reporting functionality
 
 // Define a struct for HyperLogLogPlusMinus
-impl HyperLogLogPlusMinus {
-    // Constructor with hash function parameter
-    fn new(precision: u8, sparse: bool, hash_function: fn(u64) -> u64) -> Self {
-        // Initialization, including setting the hash function
-    }
-
-    // Methods as defined before, utilizing the hash function
-    fn insert(&mut self, item: u64) {
-        let hash = (self.hash_function)(item);
-        // Insertion logic using the hash value
-    }
-
-    // Additional methods as needed
-}
 
 fn linear_counting(m: u32, v: u32) -> f64 {
     if v > m {
@@ -195,7 +225,6 @@ fn alpha(m: usize) -> f64 {
 // Unit tests for verifying functionality
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_bit_operations() { /* Tests here */

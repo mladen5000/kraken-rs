@@ -1,9 +1,6 @@
 use crate::hyperloglogplus::HyperLogLogPlusMinus;
 use crate::reports::ReadCounts;
 use std::collections::HashMap;
-use std::collections::HashSet;
-
-use rayon::prelude::*;
 
 pub struct IndexOptions {
     pub k: usize,
