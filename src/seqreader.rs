@@ -206,7 +206,7 @@ impl BatchSequenceReader {
         valid
     }
 
-    pub fn next_sequence(&mut self, seq: &mut Sequence) -> bool {
+    pub fn next_sequence(&mut self, seq: &mut Sequence) -> Option<bool> {
         let mut cursor = Cursor::new(&mut self.ss);
         let result = BatchSequenceReader::read_next_sequence(
             &mut cursor, // input stream
@@ -218,9 +218,10 @@ impl BatchSequenceReader {
         if result {
             let pos = cursor.position() as usize;
             self.ss.drain(..pos);
+            Some(result)
+        } else {
+            None
         }
-
-        result
     }
 
     /// Read the next sequence from the input stream
@@ -410,21 +411,21 @@ mod tests {
             str_representation: "".to_string(),
         };
 
-        assert!(reader.next_sequence(&mut seq));
+        assert!(reader.next_sequence(&mut seq).is_some());
         assert_eq!(seq.format, SequenceFormat::Fasta);
         assert_eq!(seq.header, ">seq1");
         assert_eq!(seq.id, "seq1");
         assert_eq!(seq.seq, "ATCG");
         assert_eq!(seq.quals, "");
 
-        assert!(reader.next_sequence(&mut seq));
+        assert!(reader.next_sequence(&mut seq).is_some());
         assert_eq!(seq.format, SequenceFormat::Fasta);
         assert_eq!(seq.header, ">seq2");
         assert_eq!(seq.id, "seq2");
         assert_eq!(seq.seq, "TGCA");
         assert_eq!(seq.quals, "");
 
-        assert!(!reader.next_sequence(&mut seq));
+        assert!(!reader.next_sequence(&mut seq).is_some());
     }
 
     #[test]
@@ -443,14 +444,14 @@ mod tests {
             str_representation: "".to_string(),
         };
 
-        assert!(reader.next_sequence(&mut seq));
+        assert!(reader.next_sequence(&mut seq).is_some());
         assert_eq!(seq.format, SequenceFormat::Fastq);
         assert_eq!(seq.header, "@seq1");
         assert_eq!(seq.id, "seq1");
         assert_eq!(seq.seq, "ATCG");
         assert_eq!(seq.quals, "!@#$");
 
-        assert!(reader.next_sequence(&mut seq));
+        assert!(reader.next_sequence(&mut seq).is_some());
         assert_eq!(seq.format, SequenceFormat::Fastq);
         assert_eq!(seq.header, "@seq2");
         assert_eq!(seq.id, "seq2");
