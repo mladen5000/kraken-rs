@@ -248,49 +248,49 @@ fn mask(sd: &mut SDust) {
         }
         i += 1;
     }
+}
 
-    pub fn main() {
-        let mut line_width = 72;
-        let mut threads = 1;
-        let mut infile = "/dev/stdin".to_string();
-        let mut outfile = "/dev/stdout".to_string();
-        let prog = "k2mask";
+pub fn main() {
+    let mut line_width = 72;
+    let mut threads = 1;
+    let mut infile = "/dev/stdin".to_string();
+    let mut outfile = "/dev/stdout".to_string();
+    let prog = "k2mask";
 
-        // ... (command-line argument parsing code remains the same)
+    // ... (command-line argument parsing code remains the same)
 
-        let mut reader = BufReader::new(File::open(infile).unwrap());
-        let mut writer = BufWriter::new(File::create(outfile).unwrap());
+    let mut reader = BufReader::new(File::open(infile).unwrap());
+    let mut writer = BufWriter::new(File::create(outfile).unwrap());
 
-        let mut sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
+    let mut sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
 
-        let mut buffer = String::new();
-        let sequences: Vec<Sequence> = reader
-            .lines()
-            .map(|line| {
-                let line = line.unwrap();
-                let mut sd = SDust::new();
-                sd.seq.header = line.clone();
-                sd.seq.seq = line;
-                sd.seq.clone()
-            })
-            .collect();
+    let mut buffer = String::new();
+    let sequences: Vec<Sequence> = reader
+        .lines()
+        .map(|line| {
+            let line = line.unwrap();
+            let mut sd = SDust::new();
+            sd.seq.header = line.clone();
+            sd.seq.seq = line;
+            sd.seq.clone()
+        })
+        .collect();
 
-        let masked_sds: Vec<SDust> = sequences
-            .into_par_iter()
-            .map(|seq| {
-                let mut sd = SDust::new();
-                sd.seq = seq;
-                unsafe {
-                    mask(&mut sd);
-                }
-                sd
-            })
-            .collect();
+    let masked_sds: Vec<SDust> = sequences
+        .into_par_iter()
+        .map(|seq| {
+            let mut sd = SDust::new();
+            sd.seq = seq;
+            unsafe {
+                mask(&mut sd);
+            }
+            sd
+        })
+        .collect();
 
-        for sd in &masked_sds {
-            print_fasta(&sd.seq, &mut writer, line_width);
-        }
-
-        writer.flush().unwrap();
+    for sd in &masked_sds {
+        print_fasta(&sd.seq, &mut writer, line_width);
     }
+
+    writer.flush().unwrap();
 }
