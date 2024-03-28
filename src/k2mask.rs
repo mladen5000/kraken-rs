@@ -221,7 +221,7 @@ fn print_fasta(seq: &Sequence, out: &mut dyn Write, width: i32) {
     }
 }
 
-unsafe fn mask(sd: &mut SDust) {
+fn mask(sd: &mut SDust) {
     let mut i = 0;
     let seq = &mut sd.seq.seq;
 
@@ -229,66 +229,68 @@ unsafe fn mask(sd: &mut SDust) {
         if ASC2DNA[seq.as_bytes()[i] as usize] != 4 {
             let start = i;
             loop {
-                seq.as_bytes_mut()[i] = seq.as_bytes()[i].to_ascii_uppercase();
+                unsafe { seq.as_bytes_mut()[i] = seq.as_bytes()[i].to_ascii_uppercase() }
                 if i + 1 == seq.len() || ASC2DNA[seq.as_bytes()[i + 1] as usize] == 4 {
                     break;
                 }
                 i += 1;
             }
-            let s = &mut seq.as_bytes_mut()[start..=i];
-            run_symmetric_dust(sd, s, i - start + 1, start as i32);
+            let s = unsafe { &mut seq.as_bytes_mut()[start..=i] };
+            unsafe { run_symmetric_dust(sd, s, i - start + 1, start as i32) };
             for j in 0..sd.ranges.len() {
                 for k in sd.ranges[j].start..sd.ranges[j].finish {
-                    s[k as usize] = PROCESS_MASKED_NUCLEOTIDE(s[k as usize] as char) as u8;
+                    unsafe {
+                        s[k as usize] = PROCESS_MASKED_NUCLEOTIDE(s[k as usize] as char) as u8
+                    };
                 }
             }
             sd.ranges.clear();
         }
         i += 1;
     }
-}
 
-pub fn main() {
-    let mut line_width = 72;
-    let mut threads = 1;
-    let mut infile = "/dev/stdin".to_string();
-    let mut outfile = "/dev/stdout".to_string();
-    let prog = "k2mask";
+    pub fn main() {
+        let mut line_width = 72;
+        let mut threads = 1;
+        let mut infile = "/dev/stdin".to_string();
+        let mut outfile = "/dev/stdout".to_string();
+        let prog = "k2mask";
 
-    // ... (command-line argument parsing code remains the same)
+        // ... (command-line argument parsing code remains the same)
 
-    let mut reader = BufReader::new(File::open(infile).unwrap());
-    let mut writer = BufWriter::new(File::create(outfile).unwrap());
+        let mut reader = BufReader::new(File::open(infile).unwrap());
+        let mut writer = BufWriter::new(File::create(outfile).unwrap());
 
-    let mut sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
+        let mut sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
 
-    let mut buffer = String::new();
-    let sequences: Vec<Sequence> = reader
-        .lines()
-        .map(|line| {
-            let line = line.unwrap();
-            let mut sd = SDust::new();
-            sd.seq.header = line.clone();
-            sd.seq.seq = line;
-            sd.seq.clone()
-        })
-        .collect();
+        let mut buffer = String::new();
+        let sequences: Vec<Sequence> = reader
+            .lines()
+            .map(|line| {
+                let line = line.unwrap();
+                let mut sd = SDust::new();
+                sd.seq.header = line.clone();
+                sd.seq.seq = line;
+                sd.seq.clone()
+            })
+            .collect();
 
-    let masked_sds: Vec<SDust> = sequences
-        .into_par_iter()
-        .map(|seq| {
-            let mut sd = SDust::new();
-            sd.seq = seq;
-            unsafe {
-                mask(&mut sd);
-            }
-            sd
-        })
-        .collect();
+        let masked_sds: Vec<SDust> = sequences
+            .into_par_iter()
+            .map(|seq| {
+                let mut sd = SDust::new();
+                sd.seq = seq;
+                unsafe {
+                    mask(&mut sd);
+                }
+                sd
+            })
+            .collect();
 
-    for sd in &masked_sds {
-        print_fasta(&sd.seq, &mut writer, line_width);
+        for sd in &masked_sds {
+            print_fasta(&sd.seq, &mut writer, line_width);
+        }
+
+        writer.flush().unwrap();
     }
-
-    writer.flush().unwrap();
 }
