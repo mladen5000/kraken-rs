@@ -235,7 +235,7 @@ unsafe fn run_symmetric_dust(sd: &mut SDust, seq: &[u8], size: usize, _offset: i
             l += 1;
             triplet = ((triplet << 2) | base as i32) & 63;
             if l >= 3 {
-                window_start = cmp::max(l as i32 - WINDOW_SIZE, 0);
+                window_start = cmp::max(l - WINDOW_SIZE, 0);
                 save_masked_regions(sd, window_start);
                 shift_window(sd, triplet);
                 if sd.rw * 10 > sd.l * THRESHOLD {
@@ -278,7 +278,7 @@ unsafe fn mask(sd: &mut SDust) {
         if ASC2DNA[seq.as_bytes()[i] as usize] != 4 {
             let start = i;
             loop {
-                seq.as_mut_vec()[i] = seq.as_bytes()[i].to_ascii_uppercase() as u8;
+                seq.as_mut_vec()[i] = seq.as_bytes()[i].to_ascii_uppercase();
                 if i + 1 == seq.len() || ASC2DNA[seq.as_bytes()[i + 1] as usize] == 4 {
                     break;
                 }
@@ -301,20 +301,20 @@ unsafe fn mask(sd: &mut SDust) {
     sd.seq.seq = seq;
 }
 pub fn main() {
-    let mut line_width = 72;
-    let mut threads = 1;
-    let mut infile = "/dev/stdin".to_string();
-    let mut outfile = "/dev/stdout".to_string();
-    let prog = "k2mask";
+    let line_width = 72;
+    let threads = 1;
+    let infile = "/dev/stdin".to_string();
+    let outfile = "/dev/stdout".to_string();
+    let _prog = "k2mask";
 
     // ... (command-line argument parsing code remains the same)
 
-    let mut reader = BufReader::new(File::open(infile).unwrap());
+    let reader = BufReader::new(File::open(infile).unwrap());
     let mut writer = BufWriter::new(File::create(outfile).unwrap());
 
-    let mut sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
+    let _sds: Vec<SDust> = (0..threads).map(|_| SDust::new()).collect();
 
-    let mut buffer = String::new();
+    let _buffer = String::new();
     let sequences: Vec<Sequence> = reader
         .lines()
         .map(|line| {

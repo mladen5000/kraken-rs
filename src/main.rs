@@ -3,23 +3,27 @@
 // pub mod classify;
 // pub mod classify3;
 // pub mod compact_hash;
-// mod estimate_capacity;
+// pub mod estimate_capacity;
 // pub mod hyperloglogplus;
+
 // pub mod kraken2_data;
 // pub mod kv_store;
-// pub mod mmap_file;
 // pub mod mmscanner;
 // pub mod readcounts;
 // pub mod reports;
-pub mod seqreader;
 // pub mod taxonomy;
 // pub mod threadpool;
-// pub mod utilities;
-pub mod k2mask;
 
-use k2mask::main as k2mask_main;
+//  lookup accession numbers
+pub mod lookup_accession_numbers;
+pub mod mmap_file;
+pub mod omp_hack;
+pub mod utilities;
+
+// k2mask
+// pub mod k2mask;
+// pub mod seqreader;
 
 fn main() {
     println!("Hello, world!");
-    k2mask_main();
 }

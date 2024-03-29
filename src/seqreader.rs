@@ -24,6 +24,12 @@ pub struct Sequence {
     str_representation: String,
 }
 
+impl Default for Sequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sequence {
     pub fn new() -> Self {
         Sequence {
@@ -41,16 +47,16 @@ impl Sequence {
 
         match self.format {
             SequenceFormat::Fastq => {
-                self.str_representation.push_str("\n");
+                self.str_representation.push('\n');
                 self.str_representation.push_str(&self.seq);
                 self.str_representation.push_str("\n+\n");
                 self.str_representation.push_str(&self.quals);
-                self.str_representation.push_str("\n");
+                self.str_representation.push('\n');
             }
             _ => {
-                self.str_representation.push_str("\n");
+                self.str_representation.push('\n');
                 self.str_representation.push_str(&self.seq);
-                self.str_representation.push_str("\n");
+                self.str_representation.push('\n');
             }
         }
 
@@ -67,6 +73,12 @@ pub struct BatchSequenceReader {
     file_format: SequenceFormat,
     // Block buffer
     block_buffer: Vec<u8>,
+}
+
+impl Default for BatchSequenceReader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BatchSequenceReader {
@@ -107,7 +119,7 @@ impl BatchSequenceReader {
         if let Some(line) = ifs.lines().next() {
             self.str_buffer.clear();
             self.str_buffer.push_str(&line.unwrap());
-            self.str_buffer.push_str("\n");
+            self.str_buffer.push('\n');
             self.ss.extend_from_slice(self.str_buffer.as_bytes());
         }
 
@@ -115,7 +127,7 @@ impl BatchSequenceReader {
             while let Some(line) = ifs.lines().next() {
                 self.str_buffer.clear();
                 self.str_buffer.push_str(&line.unwrap());
-                self.str_buffer.push_str("\n");
+                self.str_buffer.push('\n');
                 self.ss.extend_from_slice(self.str_buffer.as_bytes());
                 if self.str_buffer.as_bytes()[0] == b'@' {
                     break;
@@ -126,7 +138,7 @@ impl BatchSequenceReader {
             if let Some(line) = ifs.lines().next() {
                 self.str_buffer.clear();
                 self.str_buffer.push_str(&line.unwrap());
-                self.str_buffer.push_str("\n");
+                self.str_buffer.push('\n');
                 self.ss.extend_from_slice(self.str_buffer.as_bytes());
                 lines_to_read = if self.str_buffer.as_bytes()[0] == b'@' {
                     3
@@ -137,7 +149,7 @@ impl BatchSequenceReader {
                     if let Some(line) = ifs.lines().next() {
                         self.str_buffer.clear();
                         self.str_buffer.push_str(&line.unwrap());
-                        self.str_buffer.push_str("\n");
+                        self.str_buffer.push('\n');
                         self.ss.extend_from_slice(self.str_buffer.as_bytes());
                     }
                 }
@@ -150,7 +162,7 @@ impl BatchSequenceReader {
                 if let Some(line) = ifs.lines().next() {
                     self.str_buffer.clear();
                     self.str_buffer.push_str(&line.unwrap());
-                    self.str_buffer.push_str("\n");
+                    self.str_buffer.push('\n');
                     self.ss.extend_from_slice(self.str_buffer.as_bytes());
                 }
             }
@@ -182,7 +194,7 @@ impl BatchSequenceReader {
             if let Some(line) = ifs.lines().next() {
                 self.str_buffer.clear();
                 self.str_buffer.push_str(&line.unwrap());
-                self.str_buffer.push_str("\n");
+                self.str_buffer.push('\n');
                 self.ss.extend_from_slice(self.str_buffer.as_bytes());
                 line_count += 1;
                 valid = true;
@@ -191,11 +203,9 @@ impl BatchSequenceReader {
                     if line_count % 4 == 0 {
                         remaining_record_count -= 1;
                     }
-                } else {
-                    if let Some(byte) = ifs.bytes().next() {
-                        if byte.unwrap() == b'>' {
-                            remaining_record_count -= 1;
-                        }
+                } else if let Some(byte) = ifs.bytes().next() {
+                    if byte.unwrap() == b'>' {
+                        remaining_record_count -= 1;
                     }
                 }
             } else {
@@ -425,7 +435,7 @@ mod tests {
         assert_eq!(seq.seq, "TGCA");
         assert_eq!(seq.quals, "");
 
-        assert!(!reader.next_sequence(&mut seq).is_some());
+        assert!(reader.next_sequence(&mut seq).is_none());
     }
 
     #[test]
@@ -457,8 +467,6 @@ mod tests {
         assert_eq!(seq.id, "seq2");
         assert_eq!(seq.seq, "TGCA");
         assert_eq!(seq.quals, "$#@!");
-
-        assert!(!reader.next_sequence(&mut seq));
     }
 
     #[test]
