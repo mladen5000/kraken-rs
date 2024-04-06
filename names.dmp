@@ -1,0 +1,7 @@
+1	|	all	|		|	synonym	|
+1	|	root	|		|	scientific name	|
+2	|	Bacteria	|	Bacteria <prokaryote>	|	scientific name	|
+2	|	Monera	|	Monera <Bacteria>	|	in-part	|
+2	|	Procaryotae	|	Procaryotae <Bacteria>	|	in-part	|
+3	|	Firmicutes	|	Firmicutes <Bacteria>	|	scientific name	|
+3	|	Actinobacteria	|	Actinobacteria <Bacteria>	|	scientific name	|

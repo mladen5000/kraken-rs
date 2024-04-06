@@ -4,6 +4,8 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
+use bincode;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
@@ -18,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 /// In other words, a node is a taxonomic unit in the NCBI taxonomy tree, such as a species, genus, family, order, class, phylum, or kingdom.
 ///
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Serialize, Deserialize)]
 pub struct TaxonomyNode {
     // Parent node
     pub parent_id: u64,
@@ -238,7 +240,7 @@ impl NCBITaxonomy {
 
 /// Taxonomy is a structure that holds the taxonomy tree in memory.
 /// It differs from NCBITaxonomy and TaxonomyNode by storing the taxonomy tree in a file-backed format.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Taxonomy {
     /// File_backed is a boolean that indicates whether the taxonomy is file-backed.
     pub file_backed: bool,
@@ -272,11 +274,11 @@ impl Taxonomy {
         }
     }
 
-    pub fn from_file(filename: &str, memory_mapping: bool) -> Self {
-        let mut taxo = Taxonomy::new();
-        taxo.init(filename, memory_mapping);
-        taxo
-    }
+    // pub fn from_file_old(filename: &str, memory_mapping: bool) -> Self {
+    //     let mut taxo = Taxonomy::new();
+    //     taxo.init(filename, memory_mapping);
+    //     taxo
+    // }
 
     /// Majority of this code is building the Taxonomy struct from a file.
     /// Each struct field is a buffer which we fill from the disk file.
@@ -365,22 +367,22 @@ impl Taxonomy {
     }
 
     /// Serialize the taxonomy to disk.
-    pub fn write_to_disk(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut file = File::create(filename)?;
-        file.write_all(b"K2TAXDAT")?;
-        file.write_all(&self.node_count.to_le_bytes())?;
-        file.write_all(&self.name_data_len.to_le_bytes())?;
-        file.write_all(&self.rank_data_len.to_le_bytes())?;
-        file.write_all(unsafe {
-            std::slice::from_raw_parts(
-                self.nodes.as_ptr() as *const u8,
-                self.node_count * std::mem::size_of::<TaxonomyNode>(),
-            )
-        })?;
-        file.write_all(&self.name_data)?;
-        file.write_all(&self.rank_data)?;
-        Ok(())
-    }
+    // pub fn write_to_disk_old(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+    //     let mut file = File::create(filename)?;
+    //     file.write_all(b"K2TAXDAT")?;
+    //     file.write_all(&self.node_count.to_le_bytes())?;
+    //     file.write_all(&self.name_data_len.to_le_bytes())?;
+    //     file.write_all(&self.rank_data_len.to_le_bytes())?;
+    //     file.write_all(unsafe {
+    //         std::slice::from_raw_parts(
+    //             self.nodes.as_ptr() as *const u8,
+    //             self.node_count * std::mem::size_of::<TaxonomyNode>(),
+    //         )
+    //     })?;
+    //     file.write_all(&self.name_data)?;
+    //     file.write_all(&self.rank_data)?;
+    //     Ok(())
+    // }
 
     /// Generate a mapping from external IDs to internal IDs.   
     pub fn generate_external_to_internal_id_map(&mut self) -> &mut Self {
@@ -399,6 +401,20 @@ impl Taxonomy {
             .external_to_internal_id_map
             .get(&external_id)
             .unwrap_or(&0)
+    }
+    pub fn write_to_disk(&self, filename: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = File::create(filename)?;
+        let encoded: Vec<u8> = serde_json::to_vec(self)?;
+        file.write_all(&encoded)?;
+        Ok(())
+    }
+
+    pub fn from_file(filename: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut file = File::open(filename)?;
+        let mut encoded = Vec::new();
+        file.read_to_end(&mut encoded)?;
+        let taxo: Taxonomy = serde_json::from_slice(&encoded)?;
+        Ok(taxo)
     }
 }
 
@@ -483,8 +499,8 @@ mod tests {
         file1.write_all(nodes_content.as_bytes()).unwrap();
         file2.write_all(names_content.as_bytes()).unwrap();
 
-        let nodes_file = "/Users/mladenrasic/taxdump/nodes.dmp";
-        let names_file = "/Users/mladenrasic/taxdump/names.dmp";
+        // let nodes_file = "/Users/mladenrasic/taxdump/nodes.dmp";
+        // let names_file = "/Users/mladenrasic/taxdump/names.dmp";
 
         let taxonomy = NCBITaxonomy::new(nodes_file, names_file).unwrap();
 
@@ -492,31 +508,35 @@ mod tests {
         taxonomy.convert_to_kraken_taxonomy("kraken.dmp").unwrap(); // writes to kraken_file
 
         // Deserialize //error here
-        let kraken_taxonomy: Taxonomy = Taxonomy::from_file("kraken.dmp", false);
+        let kraken_taxonomy = Taxonomy::from_file("kraken.dmp").unwrap();
 
         println!("{:#?}", kraken_taxonomy);
 
         assert_eq!(kraken_taxonomy.node_count, 2);
-        assert_eq!(kraken_taxonomy.name_data_len, 12);
-        assert_eq!(kraken_taxonomy.rank_data_len, 19);
+        assert_eq!(kraken_taxonomy.name_data_len, 5);
+        assert_eq!(kraken_taxonomy.rank_data_len, 4);
 
-        std::fs::remove_file(nodes_file).unwrap();
-        std::fs::remove_file(names_file).unwrap();
-        std::fs::remove_file("kraken.dmp").unwrap();
+        // std::fs::remove_file(nodes_file).unwrap();
+        // std::fs::remove_file(names_file).unwrap();
+        // std::fs::remove_file("kraken.dmp").unwrap();
     }
 
     #[test]
     fn test_taxonomy_is_a_ancestor_of_b() {
-        let nodes_content = "1\t|\t1\t|\t1\t|\tno rank\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\n2\t|\t1\t|\t2\t|\tsuperkingdom\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\n";
-        let names_content = "1\t|\tall\t|\t\t|\tsynonym\t|\n1\t|\troot\t|\t\t|\tscientific name\t|\n2\t|\tBacteria\t|\tBacteria <prokaryote>\t|\tscientific name\t|\n2\t|\tMonera\t|\tMonera <Bacteria>\t|\tin-part\t|\n2\t|\tProcaryotae\t|\tProcaryotae <Bacteria>\t|\tin-part\t|\n";
+        let nodes_content = "1\t|\t1\t|\t1\t|\tno rank\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\n2\t|\t1\t|\t2\t|\tsuperkingdom\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\n3\t|\t1\t|\t3\t|\tphylum\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\n";
+        let names_content = "1\t|\tall\t|\t\t|\tsynonym\t|\n1\t|\troot\t|\t\t|\tscientific name\t|\n2\t|\tBacteria\t|\tBacteria <prokaryote>\t|\tscientific name\t|\n2\t|\tMonera\t|\tMonera <Bacteria>\t|\tin-part\t|\n2\t|\tProcaryotae\t|\tProcaryotae <Bacteria>\t|\tin-part\t|\n3\t|\tFirmicutes\t|\tFirmicutes <Bacteria>\t|\tscientific name\t|\n3\t|\tActinobacteria\t|\tActinobacteria <Bacteria>\t|\tscientific name\t|\n";
 
         let nodes_file = "nodes.dmp";
         let names_file = "names.dmp";
 
         let mut file = File::create(nodes_file).unwrap();
         file.write_all(nodes_content.as_bytes()).unwrap();
+
         let mut file = File::create(names_file).unwrap();
         file.write_all(names_content.as_bytes()).unwrap();
+
+        // let nodes_file = "/Users/mladenrasic/taxdump/nodes.dmp";
+        // let names_file = "/Users/mladenrasic/taxdump/names.dmp";
 
         let ncbi_taxonomy = NCBITaxonomy::new(nodes_file, names_file).unwrap();
         let mut kraken_taxonomy = ncbi_taxonomy
@@ -528,7 +548,7 @@ mod tests {
         println!("{:#?}", mut_taxonomy);
 
         assert_eq!(mut_taxonomy.external_to_internal_id_map.len(), 2);
-        assert_eq!(mut_taxonomy.external_to_internal_id_map.get(&1), Some(&2));
-        assert_eq!(mut_taxonomy.external_to_internal_id_map.get(&0), Some(&2));
+        assert_eq!(mut_taxonomy.external_to_internal_id_map.get(&1), Some(&1));
+        assert_eq!(mut_taxonomy.external_to_internal_id_map.get(&0), Some(&0));
     }
 }

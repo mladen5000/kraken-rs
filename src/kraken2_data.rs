@@ -1,5 +1,5 @@
 use crate::hyperloglogplus::HyperLogLogPlusMinus;
-use crate::reports::ReadCounts;
+use crate::readcounts::ReadCounts;
 use std::collections::HashMap;
 
 pub struct IndexOptions {

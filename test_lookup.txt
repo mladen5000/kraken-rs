@@ -1,0 +1,3 @@
+seq1	acc1
+seq2	acc2
+seq3	acc3
