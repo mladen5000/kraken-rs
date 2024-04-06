@@ -1,8 +1,8 @@
 // hyperloglogplus.rs
 
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::mem;
+
+
 
 /// HyperLogLog++ class for counting the number of unique 64-bit values in a stream.
 pub struct HyperLogLogPlusMinus {
@@ -192,7 +192,7 @@ impl HyperLogLogPlusMinus {
     /// hll.insert(3);
     /// let cardinality = hll.heule_cardinality(true);
     /// ```
-    pub fn heule_cardinality(&self, correct_bias: bool) -> u64 {
+    pub fn heule_cardinality(&self, _correct_bias: bool) -> u64 {
         // Implementation of the Heule estimator
         // ...
         unimplemented!()
@@ -230,7 +230,7 @@ impl HyperLogLogPlusMinus {
     /// hll.insert(3);
     /// let cardinality = hll.flajolet_cardinality(true);
     /// ```
-    pub fn flajolet_cardinality(&self, use_sparse_precision: bool) -> u64 {
+    pub fn flajolet_cardinality(&self, _use_sparse_precision: bool) -> u64 {
         // Implementation of the Flajolet estimator
         // ...
         unimplemented!()
@@ -281,7 +281,7 @@ impl HyperLogLogPlusMinus {
 
         if idx_shifted << self.p == 0 {
             let additional_rank = self.get_rank(hash_value << Self::P_PRIME);
-            (idx_shifted | ((additional_rank as u32) << 1) | 1)
+            idx_shifted | ((additional_rank as u32) << 1) | 1
         } else {
             idx_shifted
         }

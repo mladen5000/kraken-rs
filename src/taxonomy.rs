@@ -4,7 +4,7 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
-use bincode;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
@@ -157,7 +157,7 @@ impl NCBITaxonomy {
     pub fn convert_to_kraken_taxonomy(
         &self,
         filename: &str,
-    ) -> Result<(Taxonomy), Box<dyn std::error::Error>> {
+    ) -> Result<Taxonomy, Box<dyn std::error::Error>> {
         let zeroes_node = TaxonomyNode {
             parent_id: 0,
             first_child: 0,
@@ -288,7 +288,7 @@ impl Taxonomy {
             // TODO: Implement memory mapping
         } else {
             let mut file = BufReader::new(File::open(filename).unwrap());
-            let mut magic = [0; 8]; // 8 bytes possibly k2taxdat?
+            let _magic = [0; 8]; // 8 bytes possibly k2taxdat?
 
             // ...
 
