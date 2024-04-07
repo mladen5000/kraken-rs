@@ -1,19 +1,11 @@
-use std::collections::{HashMap, HashSet};
+// Placeholder for output equivalence testing...
 
-#[derive(Debug)]
-pub struct TaxonomyNode {
-    parent_id: u64,
-    first_child: u64,
-    child_count: u64,
-    name_offset: u64,
-    rank_offset: u64,
-    external_id: u64,
-    godparent_id: u64,
-}
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::error::Error;
 
 pub struct NCBITaxonomy {
-    nodes_filename: String,
-    names_filename: String,
     parent_map: HashMap<u64, u64>,
     name_map: HashMap<u64, String>,
     rank_map: HashMap<u64, String>,
@@ -22,18 +14,71 @@ pub struct NCBITaxonomy {
     known_ranks: HashSet<String>,
 }
 
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
-use std::error::Error;
-
+impl NCBITaxonomy {
     pub fn new(nodes_filename: &str, names_filename: &str) -> Result<Self, Box<dyn Error>> {
-        let nodes_file = File::open(nodes_filename)
-            .map_err(|e| format!("Failed to open nodes file '{}': {}", nodes_filename, e))?;
-        let names_file = File::open(names_filename)
-            .map_err(|e| format!("Failed to open names file '{}': {}", names_filename, e))?;
+        let mut ncbi_taxonomy = NCBITaxonomy {
+            parent_map: HashMap::new(),
+            name_map: HashMap::new(),
+            rank_map: HashMap::new(),
+            child_map: HashMap::new(),
+            marked_nodes: HashSet::new(),
+            known_ranks: HashSet::new(),
+        };
 
-        // Continue with the rest of the method...
+        let mut parent_map: HashMap<u64, u64> = HashMap::new();
+        let mut name_map: HashMap<u64, String> = HashMap::new();
+        let mut rank_map: HashMap<u64, String> = HashMap::new();
+        let mut child_map: HashMap<u64, HashSet<u64>> = HashMap::new();
+        let mut marked_nodes: HashSet<u64> = HashSet::new();
+        let mut known_ranks: HashSet<String> = HashSet::new();
+
+        let nodes_file = File::open(nodes_filename)?;
+        let reader = BufReader::new(nodes_file);
+        // Parse nodes file
+        let nodes_file = File::open(nodes_filename)?;
+        let reader = BufReader::new(nodes_file);
+        for line in reader.lines() {
+            let line = line?;
+            let parts: Vec<&str> = line.split("\t|\t").collect();
+            if parts.len() < 3 { continue; }
+
+            let node_id: u64 = parts[0].parse()?;
+            let parent_id: u64 = parts[1].parse()?;
+            let rank: String = parts[2].to_string();
+
+            ncbi_taxonomy.parent_map.insert(node_id, parent_id);
+            ncbi_taxonomy.rank_map.insert(node_id, rank);
+            ncbi_taxonomy.child_map.entry(parent_id).or_insert_with(HashSet::new).insert(node_id);
+        }
+
+        // Parse names file
+        let names_file = File::open(names_filename)?;
+        let names_reader = BufReader::new(names_file);
+        for line in names_reader.lines() {
+            let line = line?;
+            let parts: Vec<&str> = line.split("\t|\t").collect();
+            if parts.len() < 4 { continue; }
+
+            let node_id: u64 = parts[0].parse()?;
+            let name: String = parts[1].to_string();
+
+            ncbi_taxonomy.name_map.insert(node_id, name);
+        }
+
+
+        Ok(NCBITaxonomy {
+            parent_map,
+            name_map,
+            rank_map,
+            child_map,
+            marked_nodes,
+            known_ranks,
+        })
     }
+}
+}
+}
+
 
 
 
@@ -80,5 +125,37 @@ use std::error::Error;
             current_b = self.nodes[current_b as usize].parent_id;
         }
         current_b
+    }
+    pub fn mark_node(&mut self, taxid: u64) {
+        let mut current_taxid = taxid;
+        while !self.marked_nodes.contains(&current_taxid) {
+            self.marked_nodes.insert(current_taxid);
+            if let Some(&parent_id) = self.parent_map.get(&current_taxid) {
+                current_taxid = parent_id;
+            } else {
+                break; // Reached the root or an unconnected node
+            }
+        }
+    }
+    pub fn convert_to_kraken_taxonomy(&self, filename: &str) -> Result<(), Box<dyn Error>> {
+        let file = File::create(filename)?;
+        let mut writer = BufWriter::new(file);
+
+        writer.write_all(b"Kraken taxonomy data\n")?;
+
+        // Iterate over marked nodes and organize them for Kraken format
+        // Iterate over marked nodes and organize them for Kraken format
+        for (&node_id, _) in self.marked_nodes.iter() {
+            let parent_id = self.parent_map.get(&node_id).unwrap_or(&0);
+            let rank = self.rank_map.get(&node_id).unwrap_or(&String::from("unknown"));
+            let name = self.name_map.get(&node_id).unwrap_or(&String::from("unknown"));
+            // Example: Writing node data to the file
+            writer.write_fmt(format_args!("node_id: {}, parent_id: {}, rank: {}, name: {}\n", node_id, parent_id, rank, name))?;
+        }
+
+        writer.flush()?;
+        Ok(())
+        Ok(())
+    }
     }
 }
