@@ -141,20 +141,20 @@ impl NCBITaxonomy {
         let file = File::create(filename)?;
         let mut writer = BufWriter::new(file);
 
+        // Write the header or initial taxonomy data to the file
         writer.write_all(b"Kraken taxonomy data\n")?;
 
         // Iterate over marked nodes and organize them for Kraken format
-        // Iterate over marked nodes and organize them for Kraken format
         for (&node_id, _) in self.marked_nodes.iter() {
             let parent_id = self.parent_map.get(&node_id).unwrap_or(&0);
-            let rank = self.rank_map.get(&node_id).unwrap_or(&String::from("unknown"));
-            let name = self.name_map.get(&node_id).unwrap_or(&String::from("unknown"));
-            // Example: Writing node data to the file
+            let rank = self.rank_map.get(&node_id).unwrap_or(&"unknown".to_string());
+            let name = self.name_map.get(&node_id).unwrap_or(&"unknown".to_string());
+
+            // Writing node data to the file
             writer.write_fmt(format_args!("node_id: {}, parent_id: {}, rank: {}, name: {}\n", node_id, parent_id, rank, name))?;
         }
 
         writer.flush()?;
-        Ok(())
         Ok(())
     }
     }
