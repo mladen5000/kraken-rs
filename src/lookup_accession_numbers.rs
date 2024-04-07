@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 
 /// Main functions performs the following:
 /// 1. Read the lookup file and create a map from accession number to list of sequence IDs
@@ -139,8 +139,8 @@ mod tests {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
             handle.write_all(b"Hello, world!").unwrap();
-            handle.flush().unwrap();
-            file.write_all(&handle.into_inner().unwrap()).unwrap();
+            handle.flush();
+            file.write_all(&handle.unwrap().to_vec()).unwrap();
         }
 
         // Now you can read the file and compare its contents to your expected output

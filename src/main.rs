@@ -21,11 +21,11 @@ pub mod taxonomy;
 pub mod utilities;
 
 //  lookup accession numbers
-// pub mod lookup_accession_numbers;
+pub mod lookup_accession_numbers;
 pub mod readcounts;
-// pub mod mmap_file;
-// pub mod omp_hack;
-// pub mod utilities;
+// // pub mod mmap_file;
+// // pub mod omp_hack;
+// // pub mod utilities;
 
 // k2mask
 // pub mod k2mask;

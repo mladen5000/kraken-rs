@@ -10,7 +10,8 @@ use std::io::Write;
 
 use crate::hyperloglogplus::{murmurhash3_finalizer, HyperLogLogPlusMinus};
 use crate::kraken2_data::{ReadCounter, TaxonCounters, TaxonCounts};
-use crate::taxonomy::{Taxonomy};
+use crate::taxonomy::Taxonomy;
+use crate::taxonomy::TaxonomyNode;
 
 /// Calculates the clade counts based on the given call counts and taxonomy.
 pub fn get_clade_counts(taxonomy: &Taxonomy, call_counts: &TaxonCounts) -> TaxonCounts {
