@@ -72,5 +72,33 @@ pub struct Taxonomy {
 }
 
 impl Taxonomy {
-    // Placeholder for method implementations
+    // Existing implementations...
+
+    pub fn is_a_ancestor_of_b(&self, a: u64, b: u64) -> bool {
+        if a == 0 || b == 0 {
+            return false;
+        }
+        let mut current = b;
+        while current > a && current != 0 {
+            current = self.nodes[current as usize].parent_id;
+        }
+        current == a
+    }
+
+    pub fn lowest_common_ancestor(&self, a: u64, b: u64) -> u64 {
+        if a == 0 || b == 0 {
+            return if a == 0 { b } else { a };
+        }
+        let mut ancestors_a = HashSet::new();
+        let mut current_a = a;
+        while current_a != 0 {
+            ancestors_a.insert(current_a);
+            current_a = self.nodes[current_a as usize].parent_id;
+        }
+        let mut current_b = b;
+        while !ancestors_a.contains(&current_b) && current_b != 0 {
+            current_b = self.nodes[current_b as usize].parent_id;
+        }
+        current_b
+    }
 }
