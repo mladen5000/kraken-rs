@@ -26,52 +26,32 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::error::Error;
 
-impl NCBITaxonomy {
-    // Existing implementations...
+    pub fn new(nodes_filename: &str, names_filename: &str) -> Result<Self, Box<dyn Error>> {
+        let nodes_file = File::open(nodes_filename)
+            .map_err(|e| format!("Failed to open nodes file '{}': {}", nodes_filename, e))?;
+        let names_file = File::open(names_filename)
+            .map_err(|e| format!("Failed to open names file '{}': {}", names_filename, e))?;
 
-    pub fn convert_to_kraken_taxonomy(&self, filename: &str) -> Result<(), Box<dyn Error>> {
-        let mut file = File::create(filename)?;
-        let mut nodes: Vec<TaxonomyNode> = Vec::new();
-        let mut name_data = Vec::new();
-        let mut rank_data = Vec::new();
+        // Continue with the rest of the method...
+    }
 
-        // Example: Simplified logic for creating TaxonomyNode instances
-        for (&external_id, &parent_id) in &self.parent_map {
-            if self.marked_nodes.contains(&external_id) {
-                let node = TaxonomyNode {
-                    parent_id,
-                    first_child: 0, // Placeholder, needs to be calculated
-                    child_count: 0, // Placeholder, needs to be calculated
-                    name_offset: 0, // Placeholder, needs to be calculated
-                    rank_offset: 0, // Placeholder, needs to be calculated
-                    external_id,
-                    godparent_id: 0, // Reserved for future use
-                };
-                nodes.push(node);
-            }
-        }
 
-        // Example: Writing the nodes to disk (simplified)
-        for node in &nodes {
-            file.write_all(&node.parent_id.to_le_bytes())?;
-            // Repeat for other fields...
-        }
+
+    pub fn move_to_memory(&mut self) -> Result<(), Box<dyn Error>> {
+        // Assuming the initial loading mechanism involves memory-mapped files or similar,
+        // this method would convert those structures into purely in-memory equivalents.
+
+        // Example: Convert memory-mapped name and rank data into Vec<u8>
+        self.name_data = Vec::from(self.name_data.as_slice());
+        self.rank_data = Vec::from(self.rank_data.as_slice());
+
+        // Convert nodes from a memory-mapped array to a Vec<TaxonomyNode>
+        self.nodes = self.nodes.clone();
 
         Ok(())
     }
-}
 
 
-pub struct Taxonomy {
-    file_backed: bool,
-    nodes: Vec<TaxonomyNode>,
-    name_data: Vec<u8>,
-    rank_data: Vec<u8>,
-    node_count: usize,
-    external_to_internal_id_map: HashMap<u64, u64>,
-}
-
-impl Taxonomy {
     // Existing implementations...
 
     pub fn is_a_ancestor_of_b(&self, a: u64, b: u64) -> bool {
