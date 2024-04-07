@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
 
 #[derive(Debug)]
-struct TaxonomyNode {
+pub struct TaxonomyNode {
     parent_id: u64,
     first_child: u64,
     child_count: u64,
@@ -14,7 +11,7 @@ struct TaxonomyNode {
     godparent_id: u64,
 }
 
-struct NCBITaxonomy {
+pub struct NCBITaxonomy {
     nodes_filename: String,
     names_filename: String,
     parent_map: HashMap<u64, u64>,
@@ -25,35 +22,55 @@ struct NCBITaxonomy {
     known_ranks: HashSet<String>,
 }
 
-impl Taxonomy {
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::error::Error;
+
+impl NCBITaxonomy {
     // Existing implementations...
 
-    pub fn write_to_disk(&self, filename: &str) -> Result<(), Box<dyn Error>> {
+    pub fn convert_to_kraken_taxonomy(&self, filename: &str) -> Result<(), Box<dyn Error>> {
         let mut file = File::create(filename)?;
+        let mut nodes: Vec<TaxonomyNode> = Vec::new();
+        let mut name_data = Vec::new();
+        let mut rank_data = Vec::new();
 
-        // Write the file magic header
-        file.write_all(b"K2TAXDAT")?;
-
-        // Serialize and write node_count, name_data_len, and rank_data_len
-        file.write_all(&self.node_count.to_le_bytes())?;
-        file.write_all(&(self.name_data.len() as u64).to_le_bytes())?;
-        file.write_all(&(self.rank_data.len() as u64).to_le_bytes())?;
-
-        // Serialize and write each TaxonomyNode
-        for node in &self.nodes {
-            file.write_all(&node.parent_id.to_le_bytes())?;
-            file.write_all(&node.first_child.to_le_bytes())?;
-            file.write_all(&node.child_count.to_le_bytes())?;
-            file.write_all(&node.name_offset.to_le_bytes())?;
-            file.write_all(&node.rank_offset.to_le_bytes())?;
-            file.write_all(&node.external_id.to_le_bytes())?;
-            file.write_all(&node.godparent_id.to_le_bytes())?;
+        // Example: Simplified logic for creating TaxonomyNode instances
+        for (&external_id, &parent_id) in &self.parent_map {
+            if self.marked_nodes.contains(&external_id) {
+                let node = TaxonomyNode {
+                    parent_id,
+                    first_child: 0, // Placeholder, needs to be calculated
+                    child_count: 0, // Placeholder, needs to be calculated
+                    name_offset: 0, // Placeholder, needs to be calculated
+                    rank_offset: 0, // Placeholder, needs to be calculated
+                    external_id,
+                    godparent_id: 0, // Reserved for future use
+                };
+                nodes.push(node);
+            }
         }
 
-        // Write name_data and rank_data
-        file.write_all(&self.name_data)?;
-        file.write_all(&self.rank_data)?;
+        // Example: Writing the nodes to disk (simplified)
+        for node in &nodes {
+            file.write_all(&node.parent_id.to_le_bytes())?;
+            // Repeat for other fields...
+        }
 
         Ok(())
     }
+}
+
+
+pub struct Taxonomy {
+    file_backed: bool,
+    nodes: Vec<TaxonomyNode>,
+    name_data: Vec<u8>,
+    rank_data: Vec<u8>,
+    node_count: usize,
+    external_to_internal_id_map: HashMap<u64, u64>,
+}
+
+impl Taxonomy {
+    // Placeholder for method implementations
 }
