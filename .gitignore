@@ -1,12 +1,14 @@
-/.plandex
-/.vscode
-/kraken2
-/FreeAskInternet
-/target
-/firedbg
+# Directories
+/.plandex/
+/.vscode/
+/kraken2/
+/FreeAskInternet/
+/target/
+/firedbg/
+
+# Files
 .DS_Store
 Cargo.lock
-kraken2
 *.dmp
 *.txt
 *.sh
