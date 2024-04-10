@@ -34,3 +34,4 @@ firedbg/src/mmscanner2.rs.firedbg.map
 Cargo.lock
 Miniforge3-Darwin-arm64.sh
 kraken2
+.plandex
