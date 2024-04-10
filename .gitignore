@@ -2,6 +2,7 @@
 /.vscode
 /kraken2
 Cargo.lock
+firedbg/*
 firedbg/target-unit-test.json
 firedbg/target.json
 firedbg/version.toml
