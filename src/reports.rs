@@ -10,6 +10,8 @@ use std::io::Write;
 
 use crate::hyperloglogplus::{murmurhash3_finalizer, HyperLogLogPlusMinus};
 use crate::kraken2_data::{ReadCounter, TaxonCounters, TaxonCounts};
+use crate::readcounts::HyperLogLogPlusMinus;
+use crate::readcounts::ReadCounts;
 use crate::taxonomy::Taxonomy;
 use crate::taxonomy::TaxonomyNode;
 

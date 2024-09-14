@@ -5,19 +5,17 @@ pub mod estimate_capacity;
 
 // pub mod kraken2_data;
 pub mod kv_store;
-// // pub mod readcounts_old;
 // pub mod reports;
-// pub mod threadpool;
+pub mod threadpool;
 
 // // // Build DB
 // pub mod build_db;
-// pub mod compact_hash;
-// pub mod mmap_file;
-// pub mod mmscanner;
-// pub mod omp_hack;
-// pub mod seqreader;
+pub mod compact_hash;
+pub mod kraken2_data;
 pub mod kraken2_headers;
-pub mod mmap_file;
+pub mod mmscanner;
+pub mod omp_hack;
+pub mod seqreader;
 pub mod taxonomy;
 pub mod utilities;
 
@@ -26,7 +24,7 @@ pub mod lookup_accession_numbers;
 pub mod readcounts;
 
 // k2mask
-mod gz_stream;
+pub mod gz_stream;
 pub mod k2mask;
 
 fn main() {

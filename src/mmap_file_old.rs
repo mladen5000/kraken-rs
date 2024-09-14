@@ -51,14 +51,14 @@ impl MMapFile {
     ///
     /// * `io::Result<()>` indicating success or failure.
     pub fn open<P: AsRef<Path>>(
-        &mut self,
         filename: P,
         mode: i32,
         map_flags: Option<i32>,
         prot_flags: Option<i32>,
         size: Option<usize>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Self> {
         let filename = filename.as_ref();
+        let mut mmap_file = MMapFile::new();
         if (mode & O_APPEND != 0) || (mode & O_ACCMODE == O_WRONLY) {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -132,7 +132,7 @@ impl MMapFile {
         }
 
         self.valid = true;
-        Ok(())
+        Ok(mmap_file)
     }
 
     /// Provides immutable access to the memory-mapped data as a byte slice.

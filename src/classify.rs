@@ -15,9 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{cmp::Reverse, fmt};
 
-use clap::{App, Arg};
-use rayon::prelude::*;
-
+use crate::compact_hash::CompactHashTable;
+use crate::kraken2_data::TaxId;
 use crate::kraken2_data::*;
 use crate::kv_store::*;
 use crate::mmscanner::*;
@@ -26,13 +25,15 @@ use crate::reports::*;
 use crate::seqreader::*;
 use crate::taxonomy::*;
 use crate::utilities::*;
+use clap::{Arg, ArgAction, Command};
+use rayon::prelude::*;
 
 const NUM_FRAGMENTS_PER_THREAD: usize = 10_000;
 const MATE_PAIR_BORDER_TAXON: TaxId = TaxId::MAX;
 const READING_FRAME_BORDER_TAXON: TaxId = TaxId::MAX - 1;
 const AMBIGUOUS_SPAN_TAXON: TaxId = TaxId::MAX - 2;
 
-type TaxonCounters = HashMap<TaxId, TaxonCounter>;
+type TaxonCounters<TaxonCounter> = HashMap<TaxId, TaxonCounter>;
 
 #[derive(Default, Clone)]
 struct Options {
@@ -121,7 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let input_files: Vec<String> = env::args().skip(1).collect();
 
-    let mut taxon_counters: TaxonCounters = HashMap::new();
+    let mut taxon_counters: TaxonCounters<TaxonCounter> = HashMap::new();
 
     if input_files.is_empty() {
         if opts.paired_end_processing && !opts.single_file_pairs {
@@ -238,7 +239,7 @@ fn process_files(
     opts: &Options,
     stats: &mut ClassificationStats,
     outputs: &mut OutputStreamData,
-    total_taxon_counters: &mut TaxonCounters,
+    total_taxon_counters: &mut TaxonCounters<TaxonCounter>,
 ) -> Result<(), Box<dyn Error>> {
     let fptr1: Box<dyn BufRead + Send> = match filename1 {
         Some(filename) => Box::new(BufReader::new(File::open(filename)?)),
@@ -500,7 +501,7 @@ fn classify_sequence(
     taxa: &mut Vec<TaxId>,
     hit_counts: &mut HashMap<TaxId, u32>,
     translated_frames: &mut Vec<String>,
-    curr_taxon_counts: &mut TaxonCounters,
+    curr_taxon_counts: &mut TaxonCounters<TaxonCounter>,
 ) -> TaxId {
     let mut call = 0;
     taxa.clear();
@@ -666,7 +667,7 @@ fn resolve_tree(
         let mut score = 0;
 
         for (&taxon2, &count) in hit_counts.iter() {
-            if taxonomy.is_ancestor_of(taxon2, taxon) {
+            if taxonomy.is_a_ancestor_of_b(taxon2, taxon) {
                 score += count;
             }
         }
@@ -685,7 +686,7 @@ fn resolve_tree(
     while max_taxon != 0 && max_score < required_score {
         max_score = 0;
         for (&taxon, &count) in hit_counts.iter() {
-            if taxonomy.is_ancestor_of(max_taxon, taxon) {
+            if taxonomy.is_a_ancestor_of_b(max_taxon, taxon) {
                 max_score += count;
             }
         }
@@ -805,7 +806,7 @@ fn initialize_outputs(opts: &Options, outputs: &mut OutputStreamData, format: Se
     }
 }
 
-fn mask_low_quality_bases(dna: &Sequence, minimum_quality_score: usize) {
+fn mask_low_quality_bases(dna: &mut Sequence, minimum_quality_score: usize) {
     if dna.format != SequenceFormat::Fastq {
         return;
     }
@@ -841,130 +842,151 @@ fn trim_pair_info(id: &str) -> String {
 }
 
 fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
-    let matches = App::new("classify")
+    let matches = Command::new("classify")
         .version("1.0")
         .about("Kraken 2 taxonomic sequence classification system")
         .arg(
-            Arg::with_name("index_filename")
-                .short("H")
-                .takes_value(true)
+            Arg::new("index_filename")
+                .short('H')
+                .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 index filename"),
         )
         .arg(
-            Arg::with_name("taxonomy_filename")
-                .short("t")
-                .takes_value(true)
+            Arg::new("taxonomy_filename")
+                .short('t')
+                .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 taxonomy filename"),
         )
         .arg(
-            Arg::with_name("options_filename")
-                .short("o")
-                .takes_value(true)
+            Arg::new("options_filename")
+                .short('o')
+                .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 options filename"),
         )
-        .arg(Arg::with_name("quick_mode").short("q").help("Quick mode"))
         .arg(
-            Arg::with_name("use_memory_mapping")
-                .short("M")
+            Arg::new("quick_mode")
+                .short('q')
+                .action(ArgAction::SetTrue)
+                .help("Quick mode"),
+        )
+        .arg(
+            Arg::new("use_memory_mapping")
+                .short('M')
+                .action(ArgAction::SetTrue)
                 .help("Use memory mapping to access hash & taxonomy"),
         )
         .arg(
-            Arg::with_name("confidence_threshold")
-                .short("T")
-                .takes_value(true)
+            Arg::new("confidence_threshold")
+                .short('T')
+                .action(ArgAction::Set)
                 .help("Confidence score threshold (default 0)"),
         )
         .arg(
-            Arg::with_name("num_threads")
-                .short("p")
-                .takes_value(true)
+            Arg::new("num_threads")
+                .short('p')
+                .action(ArgAction::Set)
                 .help("Number of threads (default 1)"),
         )
         .arg(
-            Arg::with_name("minimum_quality_score")
-                .short("Q")
-                .takes_value(true)
+            Arg::new("minimum_quality_score")
+                .short('Q')
+                .action(ArgAction::Set)
                 .help("Minimum quality score (FASTQ only, default 0)"),
         )
         .arg(
-            Arg::with_name("paired_end_processing")
-                .short("P")
+            Arg::new("paired_end_processing")
+                .short('P')
+                .action(ArgAction::SetTrue)
                 .help("Process pairs of reads"),
         )
         .arg(
-            Arg::with_name("single_file_pairs")
-                .short("S")
+            Arg::new("single_file_pairs")
+                .short('S')
+                .action(ArgAction::SetTrue)
                 .help("Process pairs with mates in same file"),
         )
         .arg(
-            Arg::with_name("report_filename")
-                .short("R")
-                .takes_value(true)
+            Arg::new("report_filename")
+                .short('R')
+                .action(ArgAction::Set)
                 .help("Print report to filename"),
         )
         .arg(
-            Arg::with_name("mpa_style_report")
-                .short("m")
+            Arg::new("mpa_style_report")
+                .short('m')
+                .action(ArgAction::SetTrue)
                 .help("In combination with -R, use mpa-style report"),
         )
         .arg(
-            Arg::with_name("report_zero_counts")
-                .short("z")
+            Arg::new("report_zero_counts")
+                .short('z')
+                .action(ArgAction::SetTrue)
                 .help("In combination with -R, report taxa with zero count"),
         )
         .arg(
-            Arg::with_name("print_scientific_name")
-                .short("n")
+            Arg::new("print_scientific_name")
+                .short('n')
+                .action(ArgAction::SetTrue)
                 .help("Print scientific name instead of taxid in Kraken output"),
         )
         .arg(
-            Arg::with_name("minimum_hit_groups")
-                .short("g")
-                .takes_value(true)
+            Arg::new("minimum_hit_groups")
+                .short('g')
+                .action(ArgAction::Set)
                 .help("Minimum number of hit groups needed for call"),
         )
         .arg(
-            Arg::with_name("classified_output_filename")
-                .short("C")
-                .takes_value(true)
+            Arg::new("classified_output_filename")
+                .short('C')
+                .action(ArgAction::Set)
                 .help("Filename/format to have classified sequences"),
         )
         .arg(
-            Arg::with_name("unclassified_output_filename")
-                .short("U")
-                .takes_value(true)
+            Arg::new("unclassified_output_filename")
+                .short('U')
+                .action(ArgAction::Set)
                 .help("Filename/format to have unclassified sequences"),
         )
         .arg(
-            Arg::with_name("kraken_output_filename")
-                .short("O")
-                .takes_value(true)
+            Arg::new("kraken_output_filename")
+                .short('O')
+                .action(ArgAction::Set)
                 .help("Output file for normal Kraken output"),
         )
         .arg(
-            Arg::with_name("report_kmer_data")
-                .short("K")
+            Arg::new("report_kmer_data")
+                .short('K')
+                .action(ArgAction::SetTrue)
                 .help("In combination with -R, provide minimizer information in report"),
         )
         .get_matches();
 
-    opts.index_filename = matches.value_of("index_filename").unwrap().to_string();
-    opts.taxonomy_filename = matches.value_of("taxonomy_filename").unwrap().to_string();
-    opts.options_filename = matches.value_of("options_filename").unwrap().to_string();
+    opts.index_filename = matches
+        .get_one::<String>("index_filename")
+        .unwrap()
+        .to_string();
+    opts.taxonomy_filename = matches
+        .get_one::<String>("taxonomy_filename")
+        .unwrap()
+        .to_string();
+    opts.options_filename = matches
+        .get_one::<String>("options_filename")
+        .unwrap()
+        .to_string();
 
-    opts.quick_mode = matches.is_present("quick_mode");
-    opts.use_memory_mapping = matches.is_present("use_memory_mapping");
-    opts.paired_end_processing = matches.is_present("paired_end_processing");
-    opts.single_file_pairs = matches.is_present("single_file_pairs");
-    opts.mpa_style_report = matches.is_present("mpa_style_report");
-    opts.report_zero_counts = matches.is_present("report_zero_counts");
-    opts.print_scientific_name = matches.is_present("print_scientific_name");
-    opts.report_kmer_data = matches.is_present("report_kmer_data");
+    opts.quick_mode = matches.get_flag("quick_mode");
+    opts.use_memory_mapping = matches.get_flag("use_memory_mapping");
+    opts.paired_end_processing = matches.get_flag("paired_end_processing");
+    opts.single_file_pairs = matches.get_flag("single_file_pairs");
+    opts.mpa_style_report = matches.get_flag("mpa_style_report");
+    opts.report_zero_counts = matches.get_flag("report_zero_counts");
+    opts.print_scientific_name = matches.get_flag("print_scientific_name");
+    opts.report_kmer_data = matches.get_flag("report_kmer_data");
 
-    if let Some(value) = matches.value_of("confidence_threshold") {
+    if let Some(value) = matches.get_one::<String>("confidence_threshold") {
         opts.confidence_threshold = value.parse()?;
         if opts.confidence_threshold < 0.0 || opts.confidence_threshold > 1.0 {
             eprintln!("Confidence threshold must be in [0, 1]");
@@ -972,7 +994,7 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if let Some(value) = matches.value_of("num_threads") {
+    if let Some(value) = matches.get_one::<String>("num_threads") {
         opts.num_threads = value.parse()?;
         if opts.num_threads == 0 {
             eprintln!("Number of threads can't be less than 1");
@@ -980,27 +1002,27 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if let Some(value) = matches.value_of("minimum_quality_score") {
+    if let Some(value) = matches.get_one::<String>("minimum_quality_score") {
         opts.minimum_quality_score = value.parse()?;
     }
 
-    if let Some(value) = matches.value_of("minimum_hit_groups") {
+    if let Some(value) = matches.get_one::<String>("minimum_hit_groups") {
         opts.minimum_hit_groups = value.parse()?;
     }
 
-    if let Some(value) = matches.value_of("report_filename") {
+    if let Some(value) = matches.get_one::<String>("report_filename") {
         opts.report_filename = value.to_string();
     }
 
-    if let Some(value) = matches.value_of("classified_output_filename") {
+    if let Some(value) = matches.get_one::<String>("classified_output_filename") {
         opts.classified_output_filename = value.to_string();
     }
 
-    if let Some(value) = matches.value_of("unclassified_output_filename") {
+    if let Some(value) = matches.get_one::<String>("unclassified_output_filename") {
         opts.unclassified_output_filename = value.to_string();
     }
 
-    if let Some(value) = matches.value_of("kraken_output_filename") {
+    if let Some(value) = matches.get_one::<String>("kraken_output_filename") {
         opts.kraken_output_filename = value.to_string();
     }
 
@@ -1011,9 +1033,6 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-
-// Placeholder functions for missing implementations
-
 fn read_sequences<R: BufRead + Send>(reader: R) -> Result<Vec<Sequence>, Box<dyn Error>> {
     let mut sequences = Vec::new();
     let mut lines = reader.lines();

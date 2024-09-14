@@ -4,6 +4,8 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
+use crate::readcounts::HyperLogLogPlusMinus;
+use crate::readcounts::ReadCounts;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -29,6 +31,6 @@ pub type TaxonCounts = HashMap<TaxId, u64>;
 pub type ReadCounter = ReadCounts<HashSet<u64>>;
 
 #[cfg(not(feature = "exact_counting"))]
-pub type ReadCounter = ReadCounts<HyperLogLogPlusMinus<u64>>;
+pub type ReadCounter = ReadCounts<HyperLogLogPlusMinus>;
 
 pub type TaxonCounters = HashMap<TaxId, ReadCounter>;

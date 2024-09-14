@@ -15,8 +15,9 @@ use std::string::String;
 use serde::Serialize;
 
 use crate::kraken2_headers::*;
-use crate::mmap_file::MMapFile;
+// use crate::mmap_file::MMapFile;
 use crate::utilities::*;
+use mmap::{MapOption, MemoryMap};
 
 pub type TaxId = u64;
 
@@ -211,7 +212,7 @@ pub struct Taxonomy {
     pub external_to_internal_id_map: HashMap<TaxId, TaxId>,
     file_backed: bool,
     file_magic: [u8; 8],
-    taxonomy_data_file: Option<MMapFile>,
+    taxonomy_data_file: Option<MemoryMap>,
 }
 
 impl Taxonomy {
@@ -226,31 +227,52 @@ impl Taxonomy {
 
     fn init(&mut self, filename: &str, memory_mapping: bool) -> io::Result<()> {
         if memory_mapping {
-            let mmap_file = MMapFile::open(filename)?;
-            self.file_backed = true;
-            self.taxonomy_data_file = Some(mmap_file);
+            // Open the file in read-only mode and determine its length
+            let file = File::open(filename)?;
+            let file_len = file.metadata()?.len() as usize;
 
-            let data = self.taxonomy_data_file.as_ref().unwrap().as_slice();
+            // Create a memory map with the length of the file
+            let mmap = MemoryMap::new(file_len, &[MapOption::MapReadable])
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?; // Convert MapError to io::Error
+            self.file_backed = true;
+            self.taxonomy_data_file = Some(mmap); // Fixing the field name
+
+            // Get the data from the memory-mapped file
+            let data = self.taxonomy_data_file.as_ref().unwrap().data();
+            let slice = unsafe { std::slice::from_raw_parts(data, file_len) };
             let mut offset = 0;
 
-            if &data[offset..offset + self.file_magic.len()] != self.file_magic {
-                eprintln!("Attempt to load taxonomy from malformed file {}", filename);
-                process::exit(1);
+            // Validate file magic
+            if &slice[offset..offset + self.file_magic.len()] != self.file_magic {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Malformed file: {}", filename),
+                ));
             }
             offset += self.file_magic.len();
 
-            self.node_count =
-                u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            // Helper to read u64 in little endian
+            let read_u64 = |data: &[u8], start: usize| -> u64 {
+                u64::from_le_bytes(data[start..start + 8].try_into().unwrap())
+            };
+
+            self.node_count = read_u64(slice, offset) as usize;
             offset += 8;
-            self.name_data_len =
-                u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            self.name_data_len = read_u64(slice, offset) as usize;
             offset += 8;
-            self.rank_data_len =
-                u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            self.rank_data_len = read_u64(slice, offset) as usize;
             offset += 8;
 
-            let node_slice =
-                &data[offset..offset + self.node_count * std::mem::size_of::<TaxonomyNode>()];
+            // Read nodes
+            let node_size = std::mem::size_of::<TaxonomyNode>();
+            let nodes_end = offset + self.node_count * node_size;
+            if nodes_end > slice.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Unexpected end of file while reading nodes",
+                ));
+            }
+            let node_slice = &slice[offset..nodes_end];
             self.nodes = unsafe {
                 std::slice::from_raw_parts(
                     node_slice.as_ptr() as *const TaxonomyNode,
@@ -258,11 +280,28 @@ impl Taxonomy {
                 )
                 .to_vec()
             };
-            offset += self.node_count * std::mem::size_of::<TaxonomyNode>();
+            offset = nodes_end;
 
-            self.name_data = data[offset..offset + self.name_data_len].to_vec();
-            offset += self.name_data_len;
-            self.rank_data = data[offset..offset + self.rank_data_len].to_vec();
+            // Read name_data
+            let name_data_end = offset + self.name_data_len;
+            if name_data_end > slice.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Unexpected end of file while reading name_data",
+                ));
+            }
+            self.name_data = slice[offset..name_data_end].to_vec();
+            offset = name_data_end;
+
+            // Read rank_data
+            let rank_data_end = offset + self.rank_data_len;
+            if rank_data_end > slice.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Unexpected end of file while reading rank_data",
+                ));
+            }
+            self.rank_data = slice[offset..rank_data_end].to_vec();
         } else {
             let mut file = File::open(filename)?;
             let mut buffer = Vec::new();
@@ -271,8 +310,10 @@ impl Taxonomy {
             let mut offset = 0;
 
             if &buffer[offset..offset + self.file_magic.len()] != self.file_magic {
-                eprintln!("Attempt to load taxonomy from malformed file {}", filename);
-                process::exit(1);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Malformed file: {}", filename),
+                ));
             }
             offset += self.file_magic.len();
 
