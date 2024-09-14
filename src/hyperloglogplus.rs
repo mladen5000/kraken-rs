@@ -1,12 +1,11 @@
 // hyperloglogplus.rs
 
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 
 /// 64-bit Mixer/Finalizer from MurmurHash3.
 /// Replace this with an actual MurmurHash3 finalizer or use a reliable crate.
 /// This is a placeholder implementation.
-fn murmurhash3_finalizer(key: u64) -> u64 {
+pub fn murmurhash3_finalizer(key: u64) -> u64 {
     let mut k = key;
     k ^= k >> 33;
     k = k.wrapping_mul(0xff51afd7ed558ccd);
@@ -49,7 +48,7 @@ impl HyperLogLogPlusMinus<fn(u64) -> u64> {
 
 impl<H> HyperLogLogPlusMinus<H>
 where
-    H: Fn(u64) -> u64,
+    H: Fn(u64) -> u64 + Clone,
 {
     /// Constructs a new HyperLogLogPlusMinus with given precision, sparse flag, and bit mixer function.
     /// - `precision`: Determines the number of registers (m = 2^p). Default is 12.
@@ -80,7 +79,7 @@ where
             n_observed: self.n_observed,
             sparse: self.sparse,
             sparse_list: self.sparse_list.clone(),
-            bit_mixer: self.bit_mixer,
+            bit_mixer: self.bit_mixer.clone(),
             const_p_prime: self.const_p_prime,
             const_m_prime: self.const_m_prime,
             use_n_observed: self.use_n_observed,
@@ -159,7 +158,7 @@ where
         self.n_observed += other.n_observed;
         if self.sparse && other.sparse {
             // Merge sparse lists
-            for &index in &other.sparse_list {
+            for index in other.sparse_list.clone() {
                 self.sparse_list.insert(index);
             }
             // Check if need to switch to normal representation
@@ -173,7 +172,7 @@ where
             }
             if other.sparse {
                 // Add other's sparse list to self's registers
-                self.add_to_registers(&other.sparse_list);
+                self.add_to_registers(other.sparse_list.clone());
             } else {
                 // Merge the registers by taking the maximum value for each register
                 for i in 0..self.m {
@@ -247,23 +246,26 @@ where
 
     /// Private helper to switch from sparse to normal representation.
     fn switch_to_normal_representation(&mut self) {
+        // Take ownership of the sparse_list
+        let sparse_list = std::mem::take(&mut self.sparse_list);
         // Convert the sparse list to normal representation by updating registers
-        self.add_to_registers(&self.sparse_list);
+        self.add_to_registers(sparse_list);
         self.sparse = false;
-        self.sparse_list.clear();
+        // No need to clear sparse_list since we've already taken it
     }
 
     /// Private helper to add elements from sparse_list to registers.
-    fn add_to_registers(&mut self, sparse_list: &SparseListType) {
-        for &index in sparse_list {
+    fn add_to_registers(&mut self, sparse_list: SparseListType) {
+        for index in sparse_list {
             // Reconstruct the original hash value from index.
-            // Note: Without the original item, it's unclear how to reconstruct the hash.
-            // This requires additional information or storing more data in the sparse representation.
-            // Placeholder implementation:
-            // Assuming index corresponds directly to register index.
-            // In practice, you need the full hash to update the registers correctly.
-            // Here, we skip actual implementation.
-            // TODO: Implement proper reconstruction of hash values if possible.
+            // Note: This is a placeholder implementation.
+            // You'll need to implement the actual logic based on your use case.
+            let hash = index as u64; // Adjust as necessary
+
+            let (register_index, rank) = self.extract_register_info(hash);
+            if rank > self.m_registers[register_index] {
+                self.m_registers[register_index] = rank;
+            }
         }
     }
 

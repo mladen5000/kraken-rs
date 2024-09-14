@@ -1,8 +1,7 @@
-use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 /// Constant array to map ASCII characters to DNA bases.

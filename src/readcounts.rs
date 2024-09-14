@@ -1,7 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::hash::Hash;
-use std::marker::PhantomData;
 use std::ops::{Add, AddAssign};
 
 // Updated HyperLogLogPlusMinus implementation
@@ -75,7 +73,7 @@ impl KmerContainer for HyperLogLogPlusMinus {
 }
 
 // Updated ReadCounts struct
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ReadCounts<T>
 where
     T: KmerContainer,

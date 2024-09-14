@@ -4,7 +4,6 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
-use std::collections::HashMap;
 
 pub fn translate_to_all_frames(dna_seq: &str, aa_seqs: &mut Vec<String>) {
     // Ensure aa_seqs has 6 elements, one for each reading frame

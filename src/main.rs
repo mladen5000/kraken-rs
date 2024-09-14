@@ -1,17 +1,16 @@
 pub mod aa_translate;
-// pub mod classify;
+pub mod classify;
 pub mod estimate_capacity;
-// pub mod hyperloglogplus;
+pub mod hyperloglogplus;
 
-// pub mod kraken2_data;
+pub mod kraken2_data;
 pub mod kv_store;
-// pub mod reports;
+pub mod reports;
 pub mod threadpool;
 
-// // // Build DB
+// Build DB
 // pub mod build_db;
 pub mod compact_hash;
-pub mod kraken2_data;
 pub mod kraken2_headers;
 pub mod mmscanner;
 pub mod omp_hack;
@@ -19,7 +18,7 @@ pub mod seqreader;
 pub mod taxonomy;
 pub mod utilities;
 
-// //  lookup accession numbers
+//  lookup accession numbers
 pub mod lookup_accession_numbers;
 pub mod readcounts;
 

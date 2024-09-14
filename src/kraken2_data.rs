@@ -4,11 +4,14 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::readcounts::HyperLogLogPlusMinus;
 use crate::readcounts::ReadCounts;
 use std::collections::HashMap;
-use std::collections::HashSet;
 
+#[derive(Serialize, Deserialize)]
 pub struct IndexOptions {
     pub k: usize,
     pub l: usize,
@@ -16,9 +19,9 @@ pub struct IndexOptions {
     pub toggle_mask: u64,
     pub dna_db: bool,
     pub minimum_acceptable_hash_value: u64,
-    pub revcom_version: i32, // Fix bug from before K2.0.8
-    pub db_version: i32,     // To allow for future database structural changes
-    pub db_type: i32,        // To allow for future use of other data structures
+    pub revcom_version: u32, // Fix bug from before K2.0.8
+    pub db_version: u32,     // To allow for future database structural changes
+    pub db_type: u32,        // To allow for future use of other data structures
 }
 
 pub type TaxId = u64;

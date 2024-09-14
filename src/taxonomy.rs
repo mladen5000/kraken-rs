@@ -5,18 +5,15 @@
  */
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
-use std::path::Path;
 use std::process;
 use std::str;
 use std::string::String;
 
 use serde::Serialize;
 
-use crate::kraken2_headers::*;
 // use crate::mmap_file::MMapFile;
-use crate::utilities::*;
 use mmap::{MapOption, MemoryMap};
 
 pub type TaxId = u64;
@@ -345,7 +342,7 @@ impl Taxonomy {
         Ok(())
     }
 
-    pub fn is_a_ancestor_of_b(&self, mut a: TaxId, mut b: TaxId) -> bool {
+    pub fn is_a_ancestor_of_b(&self, a: TaxId, mut b: TaxId) -> bool {
         if a == 0 || b == 0 {
             return false;
         }

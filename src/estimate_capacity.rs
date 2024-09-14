@@ -5,8 +5,7 @@
  */
 
 use std::collections::HashSet;
-use std::env;
-use std::io::{self, BufRead, Read};
+use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
 use clap::{Arg, ArgAction, Command};
@@ -351,7 +350,7 @@ fn kmer_to_u64(kmer: &str) -> u64 {
 
 fn murmur_hash3(key: u64) -> u64 {
     // Placeholder for MurmurHash3 function
-    use std::hash::{BuildHasher, Hasher};
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     hasher.write_u64(key);
     hasher.finish()

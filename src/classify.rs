@@ -1,30 +1,26 @@
-/*
- * Copyright 2013-2023, Derrick Wood <dwood@cs.jhu.edu>
- *
- * This file is part of the Kraken 2 taxonomic sequence classification system.
- */
-
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::error::Error;
-use std::fs::{metadata, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process;
-use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{cmp::Reverse, fmt};
 
 use crate::compact_hash::CompactHashTable;
 use crate::kraken2_data::TaxId;
 use crate::kraken2_data::*;
+use crate::kv_store::murmur_hash3;
 use crate::kv_store::*;
 use crate::mmscanner::*;
 use crate::readcounts::*;
 use crate::reports::*;
-use crate::seqreader::*;
+use crate::seqreader::{Sequence, SequenceFormat};
 use crate::taxonomy::*;
 use crate::utilities::*;
+
 use clap::{Arg, ArgAction, Command};
 use rayon::prelude::*;
 
@@ -33,17 +29,18 @@ const MATE_PAIR_BORDER_TAXON: TaxId = TaxId::MAX;
 const READING_FRAME_BORDER_TAXON: TaxId = TaxId::MAX - 1;
 const AMBIGUOUS_SPAN_TAXON: TaxId = TaxId::MAX - 2;
 
-type TaxonCounters<TaxonCounter> = HashMap<TaxId, TaxonCounter>;
+// Corrected Type Alias
+type TaxonCounters = HashMap<TaxId, TaxonCount>;
 
 #[derive(Default, Clone)]
 struct Options {
     index_filename: String,
     taxonomy_filename: String,
     options_filename: String,
-    report_filename: String,
-    classified_output_filename: String,
-    unclassified_output_filename: String,
-    kraken_output_filename: String,
+    report_filename: Option<String>,
+    classified_output_filename: Option<String>,
+    unclassified_output_filename: Option<String>,
+    kraken_output_filename: Option<String>,
     mpa_style_report: bool,
     report_kmer_data: bool,
     quick_mode: bool,
@@ -70,12 +67,133 @@ struct ClassificationStats {
 #[derive(Default)]
 struct OutputStreamData {
     initialized: bool,
-    printing_sequences: bool,
+    kraken_output: Option<BufWriter<Box<dyn Write + Send>>>,
     classified_output1: Option<BufWriter<Box<dyn Write + Send>>>,
     classified_output2: Option<BufWriter<Box<dyn Write + Send>>>,
     unclassified_output1: Option<BufWriter<Box<dyn Write + Send>>>,
     unclassified_output2: Option<BufWriter<Box<dyn Write + Send>>>,
-    kraken_output: Option<BufWriter<Box<dyn Write + Send>>>,
+}
+impl OutputStreamData {
+    fn new() -> Self {
+        Self {
+            initialized: false,
+            kraken_output: Some(BufWriter::new(Box::new(io::stdout()))),
+            classified_output1: None,
+            classified_output2: None,
+            unclassified_output1: None,
+            unclassified_output2: None,
+        }
+    }
+
+    fn initialize(&mut self, opts: &Options, format: SequenceFormat) {
+        if self.initialized {
+            return;
+        }
+
+        // Initialize Classified Outputs
+        if let Some(ref filename) = opts.classified_output_filename {
+            if opts.paired_end_processing {
+                let fields: Vec<&str> = filename.split('#').collect();
+                if fields.len() != 2 {
+                    eprintln!(
+                        "Paired filename format must contain exactly one '#' character: {}",
+                        filename
+                    );
+                    process::exit(1);
+                }
+                self.classified_output1 = Some(BufWriter::new(Box::new(
+                    File::create(format!("{}_1{}", fields[0], fields[1])).unwrap(),
+                )));
+                self.classified_output2 = Some(BufWriter::new(Box::new(
+                    File::create(format!("{}_2{}", fields[0], fields[1])).unwrap(),
+                )));
+            } else {
+                self.classified_output1 =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
+            }
+        }
+
+        // Initialize Unclassified Outputs
+        if let Some(ref filename) = opts.unclassified_output_filename {
+            if opts.paired_end_processing {
+                let fields: Vec<&str> = filename.split('#').collect();
+                if fields.len() != 2 {
+                    eprintln!(
+                        "Paired filename format must contain exactly one '#' character: {}",
+                        filename
+                    );
+                    process::exit(1);
+                }
+                self.unclassified_output1 = Some(BufWriter::new(Box::new(
+                    File::create(format!("{}_1{}", fields[0], fields[1])).unwrap(),
+                )));
+                self.unclassified_output2 = Some(BufWriter::new(Box::new(
+                    File::create(format!("{}_2{}", fields[0], fields[1])).unwrap(),
+                )));
+            } else {
+                self.unclassified_output1 =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
+            }
+        }
+
+        // Initialize Kraken Output
+        if let Some(ref filename) = opts.kraken_output_filename {
+            if filename != "-" {
+                self.kraken_output =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
+            } else {
+                self.kraken_output = None;
+            }
+        }
+
+        self.initialized = true;
+    }
+
+    fn write_outputs(&mut self, out_data: &OutputData) {
+        if let Some(ref mut kraken_output) = self.kraken_output {
+            kraken_output
+                .write_all(out_data.kraken_str.as_bytes())
+                .unwrap();
+        }
+        if let Some(ref mut classified_output1) = self.classified_output1 {
+            classified_output1
+                .write_all(out_data.classified_out1_str.as_bytes())
+                .unwrap();
+        }
+        if let Some(ref mut classified_output2) = self.classified_output2 {
+            classified_output2
+                .write_all(out_data.classified_out2_str.as_bytes())
+                .unwrap();
+        }
+        if let Some(ref mut unclassified_output1) = self.unclassified_output1 {
+            unclassified_output1
+                .write_all(out_data.unclassified_out1_str.as_bytes())
+                .unwrap();
+        }
+        if let Some(ref mut unclassified_output2) = self.unclassified_output2 {
+            unclassified_output2
+                .write_all(out_data.unclassified_out2_str.as_bytes())
+                .unwrap();
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(ref mut kraken_output) = self.kraken_output {
+            kraken_output.flush().unwrap();
+        }
+        if let Some(ref mut classified_output1) = self.classified_output1 {
+            classified_output1.flush().unwrap();
+        }
+        if let Some(ref mut classified_output2) = self.classified_output2 {
+            classified_output2.flush().unwrap();
+        }
+        if let Some(ref mut unclassified_output1) = self.unclassified_output1 {
+            unclassified_output1.flush().unwrap();
+        }
+        if let Some(ref mut unclassified_output2) = self.unclassified_output2 {
+            unclassified_output2.flush().unwrap();
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -86,6 +204,26 @@ struct OutputData {
     classified_out2_str: String,
     unclassified_out1_str: String,
     unclassified_out2_str: String,
+}
+
+impl PartialEq for OutputData {
+    fn eq(&self, other: &Self) -> bool {
+        self.block_id == other.block_id
+    }
+}
+
+impl Eq for OutputData {}
+
+impl PartialOrd for OutputData {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OutputData {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.block_id.cmp(&self.block_id)
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -122,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let input_files: Vec<String> = env::args().skip(1).collect();
 
-    let mut taxon_counters: TaxonCounters<TaxonCounter> = HashMap::new();
+    let mut taxon_counters: TaxonCounters = HashMap::new();
 
     if input_files.is_empty() {
         if opts.paired_end_processing && !opts.single_file_pairs {
@@ -239,7 +377,7 @@ fn process_files(
     opts: &Options,
     stats: &mut ClassificationStats,
     outputs: &mut OutputStreamData,
-    total_taxon_counters: &mut TaxonCounters<TaxonCounter>,
+    total_taxon_counters: &mut TaxonCounters,
 ) -> Result<(), Box<dyn Error>> {
     let fptr1: Box<dyn BufRead + Send> = match filename1 {
         Some(filename) => Box::new(BufReader::new(File::open(filename)?)),
@@ -405,7 +543,7 @@ fn process_files(
             for (tax_id, counter) in curr_taxon_counts {
                 total_counters
                     .entry(tax_id)
-                    .or_insert_with(TaxonCounter::default)
+                    .or_insert_with(TaxonCount::default)
                     .merge(&counter);
             }
         }
@@ -490,52 +628,45 @@ fn process_files(
 
 fn classify_sequence(
     dna: &Sequence,
-    dna2: Option<&Sequence>,
+    dna2: &Sequence,
     koss: &mut String,
-    hash: &CompactHashTable,
+    hash: &dyn KeyValueStore,
     taxonomy: &Taxonomy,
     idx_opts: &IndexOptions,
     opts: &Options,
     stats: &mut ClassificationStats,
     scanner: &mut MinimizerScanner,
     taxa: &mut Vec<TaxId>,
-    hit_counts: &mut HashMap<TaxId, u32>,
-    translated_frames: &mut Vec<String>,
-    curr_taxon_counts: &mut TaxonCounters<TaxonCounter>,
+    hit_counts: &mut TaxonCounts,
+    tx_frames: &mut Vec<String>,
+    curr_taxon_counts: &mut TaxonCounters,
 ) -> TaxId {
     let mut call = 0;
     taxa.clear();
     hit_counts.clear();
     let frame_ct = if opts.use_translated_search { 6 } else { 1 };
-    let mut minimizer_hit_groups = 0i64;
+    let mut minimizer_hit_groups = 0;
 
-    for mate_num in 0..2 {
+    'outer: for mate_num in 0..2 {
         if mate_num == 1 && !opts.paired_end_processing {
             break;
         }
 
-        let seq = if mate_num == 0 {
-            &dna.seq
-        } else {
-            dna2.unwrap().seq.as_str()
-        };
-
         if opts.use_translated_search {
-            // Translate to all frames
-            translate_to_all_frames(seq, translated_frames);
+            let seq = if mate_num == 0 { &dna.seq } else { &dna2.seq };
+            translate_to_all_frames(seq, tx_frames);
         }
 
         for frame_idx in 0..frame_ct {
             if opts.use_translated_search {
-                // Load translated frame
-                scanner.load_sequence(&translated_frames[frame_idx]);
+                scanner.load_sequence(&tx_frames[frame_idx]);
             } else {
-                // Load sequence into scanner
+                let seq = if mate_num == 0 { &dna.seq } else { &dna2.seq };
                 scanner.load_sequence(seq);
             }
 
-            let mut last_minimizer = u64::MAX;
-            let mut last_taxon = TaxId::MAX;
+            let mut last_minimizer = UINT64_MAX;
+            let mut last_taxon = MATE_PAIR_BORDER_TAXON; // Initialize to a value
 
             while let Some(minimizer) = scanner.next_minimizer() {
                 let taxon = if scanner.is_ambiguous() {
@@ -543,51 +674,67 @@ fn classify_sequence(
                 } else {
                     if minimizer != last_minimizer {
                         let mut skip_lookup = false;
-                        if idx_opts.minimum_acceptable_hash_value != 0 {
+                        if idx_opts.minimum_acceptable_hash_value > 0 {
                             if murmur_hash3(minimizer) < idx_opts.minimum_acceptable_hash_value {
                                 skip_lookup = true;
                             }
                         }
-                        let taxon = if !skip_lookup { hash.get(minimizer) } else { 0 };
+
+                        let taxon = if !skip_lookup {
+                            hash.get(minimizer).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
                         last_taxon = taxon;
                         last_minimizer = minimizer;
+
                         if taxon != 0 {
                             minimizer_hit_groups += 1;
                             curr_taxon_counts
                                 .entry(taxon)
-                                .or_insert_with(TaxonCounter::default)
-                                .add_kmer(minimizer);
+                                .or_insert_with(TaxonCount::default)
+                                .add_kmer(scanner.last_minimizer());
                         }
                         taxon
                     } else {
                         last_taxon
                     }
                 };
+
                 if taxon != 0 {
-                    if opts.quick_mode && minimizer_hit_groups >= opts.minimum_hit_groups as i64 {
+                    if opts.quick_mode && minimizer_hit_groups >= opts.minimum_hit_groups {
                         call = taxon;
-                        break; // Need to break out of loops
+                        break 'outer; // Break out of all loops
                     }
                     *hit_counts.entry(taxon).or_insert(0) += 1;
                 }
+
                 taxa.push(taxon);
             }
+
             if opts.use_translated_search && frame_idx != 5 {
                 taxa.push(READING_FRAME_BORDER_TAXON);
             }
         }
+
         if opts.paired_end_processing && mate_num == 0 {
             taxa.push(MATE_PAIR_BORDER_TAXON);
         }
     }
 
-    let total_kmers = if opts.paired_end_processing {
-        taxa.len() - 1
-    } else {
-        taxa.len()
-    };
+    let mut total_kmers = taxa.len();
+    if opts.paired_end_processing {
+        total_kmers -= 1; // account for the mate pair marker
+    }
+    if opts.use_translated_search {
+        total_kmers -= if opts.paired_end_processing { 4 } else { 2 }; // account for reading frame markers
+    }
+
     call = resolve_tree(hit_counts, taxonomy, total_kmers, opts);
-    if call != 0 && minimizer_hit_groups < opts.minimum_hit_groups as i64 {
+
+    // Void a call made by too few minimizer groups
+    if call != 0 && minimizer_hit_groups < opts.minimum_hit_groups {
         call = 0;
     }
 
@@ -595,7 +742,7 @@ fn classify_sequence(
         stats.total_classified += 1;
         curr_taxon_counts
             .entry(call)
-            .or_insert_with(TaxonCounter::default)
+            .or_insert_with(TaxonCount::default)
             .increment_read_count();
     }
 
@@ -606,35 +753,32 @@ fn classify_sequence(
     }
 
     if !opts.paired_end_processing {
-        koss.push_str(&dna.id);
-        koss.push('\t');
+        koss.push_str(&format!("{}\t", dna.id));
     } else {
-        koss.push_str(&trim_pair_info(&dna.id));
-        koss.push('\t');
+        let trimmed_id = trim_pair_info(&dna.id);
+        koss.push_str(&format!("{}\t", trimmed_id));
     }
 
-    let ext_call = taxonomy.nodes[&call].external_id;
+    let ext_call = taxonomy.nodes()[call as usize].external_id;
     if opts.print_scientific_name {
-        let name = taxonomy
-            .name_data
-            .get(&call)
-            .unwrap_or(&"unclassified".to_string());
-        koss.push_str(name);
-        koss.push_str(&format!(" (taxid {})", ext_call));
+        let name = if call != 0 {
+            let node = &taxonomy.nodes()[call as usize];
+            let name_offset = node.name_offset;
+            Some(&taxonomy.name_data()[name_offset..])
+        } else {
+            None
+        };
+        let name_str = name.unwrap_or("unclassified");
+        koss.push_str(&format!("{} (taxid {})", name_str, ext_call));
     } else {
-        koss.push_str(&ext_call.to_string());
+        koss.push_str(&format!("{}", ext_call));
     }
 
     koss.push('\t');
-
     if !opts.paired_end_processing {
-        koss.push_str(&dna.seq.len().to_string());
-        koss.push('\t');
+        koss.push_str(&format!("{}\t", dna.seq.len()));
     } else {
-        let len1 = dna.seq.len();
-        let len2 = dna2.unwrap().seq.len();
-        koss.push_str(&format!("{}|{}", len1, len2));
-        koss.push('\t');
+        koss.push_str(&format!("{}|{}\t", dna.seq.len(), dna2.seq.len()));
     }
 
     if opts.quick_mode {
@@ -704,6 +848,10 @@ fn resolve_tree(
 }
 
 fn add_hitlist_string(koss: &mut String, taxa: &[TaxId], taxonomy: &Taxonomy) {
+    if taxa.is_empty() {
+        return;
+    }
+
     let mut last_code = taxa[0];
     let mut code_count = 1;
 
@@ -715,91 +863,101 @@ fn add_hitlist_string(koss: &mut String, taxa: &[TaxId], taxonomy: &Taxonomy) {
                 if last_code == AMBIGUOUS_SPAN_TAXON {
                     koss.push_str(&format!("A:{} ", code_count));
                 } else {
-                    let ext_code = taxonomy.nodes[&last_code].external_id;
-                    koss.push_str(&format!("{}:{} ", ext_code, code_count));
+                    if let Some(node) = taxonomy.nodes.get(&last_code) {
+                        let ext_code = node.external_id;
+                        koss.push_str(&format!("{}:{} ", ext_code, code_count));
+                    }
                 }
             } else {
-                koss.push_str(if last_code == MATE_PAIR_BORDER_TAXON {
+                // Mate pair/reading frame marker
+                let marker = if last_code == MATE_PAIR_BORDER_TAXON {
                     "|:| "
                 } else {
                     "-:- "
-                });
+                };
+                koss.push_str(marker);
             }
             code_count = 1;
             last_code = code;
         }
     }
 
+    // Handle the last code
     if last_code != MATE_PAIR_BORDER_TAXON && last_code != READING_FRAME_BORDER_TAXON {
         if last_code == AMBIGUOUS_SPAN_TAXON {
             koss.push_str(&format!("A:{}", code_count));
         } else {
-            let ext_code = taxonomy.nodes[&last_code].external_id;
-            koss.push_str(&format!("{}:{}", ext_code, code_count));
+            if let Some(node) = taxonomy.nodes.get(&last_code) {
+                let ext_code = node.external_id;
+                koss.push_str(&format!("{}:{}", ext_code, code_count));
+            }
         }
     } else {
-        koss.push_str(if last_code == MATE_PAIR_BORDER_TAXON {
+        let marker = if last_code == MATE_PAIR_BORDER_TAXON {
             "|:|"
         } else {
             "-:-"
-        });
+        };
+        koss.push_str(marker);
     }
 }
 
 fn initialize_outputs(opts: &Options, outputs: &mut OutputStreamData, format: SequenceFormat) {
     if !outputs.initialized {
-        if !opts.classified_output_filename.is_empty() {
+        // Classified Outputs
+        if let Some(ref filename) = opts.classified_output_filename {
             if opts.paired_end_processing {
-                let fields: Vec<&str> = opts.classified_output_filename.split('#').collect();
+                let fields: Vec<&str> = filename.split('#').collect();
                 if fields.len() != 2 {
                     eprintln!(
                         "Paired filename format must contain exactly one '#' character: {}",
-                        opts.classified_output_filename
+                        filename
                     );
                     process::exit(1);
                 }
                 outputs.classified_output1 = Some(BufWriter::new(Box::new(
-                    File::create(format!("{}1{}", fields[0], fields[1])).unwrap(),
+                    File::create(format!("{}_1{}", fields[0], fields[1])).unwrap(),
                 )));
                 outputs.classified_output2 = Some(BufWriter::new(Box::new(
-                    File::create(format!("{}2{}", fields[0], fields[1])).unwrap(),
+                    File::create(format!("{}_2{}", fields[0], fields[1])).unwrap(),
                 )));
             } else {
-                outputs.classified_output1 = Some(BufWriter::new(Box::new(
-                    File::create(&opts.classified_output_filename).unwrap(),
-                )));
+                outputs.classified_output1 =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
             }
-            outputs.printing_sequences = true;
         }
 
-        if !opts.unclassified_output_filename.is_empty() {
+        // Unclassified Outputs
+        if let Some(ref filename) = opts.unclassified_output_filename {
             if opts.paired_end_processing {
-                let fields: Vec<&str> = opts.unclassified_output_filename.split('#').collect();
+                let fields: Vec<&str> = filename.split('#').collect();
                 if fields.len() != 2 {
                     eprintln!(
                         "Paired filename format must contain exactly one '#' character: {}",
-                        opts.unclassified_output_filename
+                        filename
                     );
                     process::exit(1);
                 }
                 outputs.unclassified_output1 = Some(BufWriter::new(Box::new(
-                    File::create(format!("{}1{}", fields[0], fields[1])).unwrap(),
+                    File::create(format!("{}_1{}", fields[0], fields[1])).unwrap(),
                 )));
                 outputs.unclassified_output2 = Some(BufWriter::new(Box::new(
-                    File::create(format!("{}2{}", fields[0], fields[1])).unwrap(),
+                    File::create(format!("{}_2{}", fields[0], fields[1])).unwrap(),
                 )));
             } else {
-                outputs.unclassified_output1 = Some(BufWriter::new(Box::new(
-                    File::create(&opts.unclassified_output_filename).unwrap(),
-                )));
+                outputs.unclassified_output1 =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
             }
-            outputs.printing_sequences = true;
         }
 
-        if !opts.kraken_output_filename.is_empty() && opts.kraken_output_filename != "-" {
-            outputs.kraken_output = Some(BufWriter::new(Box::new(
-                File::create(&opts.kraken_output_filename).unwrap(),
-            )));
+        // Kraken Output
+        if let Some(ref filename) = opts.kraken_output_filename {
+            if filename != "-" {
+                outputs.kraken_output =
+                    Some(BufWriter::new(Box::new(File::create(filename).unwrap())));
+            } else {
+                outputs.kraken_output = None;
+            }
         }
 
         outputs.initialized = true;
@@ -833,8 +991,7 @@ fn trim_pair_info(id: &str) -> String {
     if id.len() <= 2 {
         return id.to_string();
     }
-    let chars: Vec<char> = id.chars().collect();
-    if chars[id.len() - 2] == '/' && (chars[id.len() - 1] == '1' || chars[id.len() - 1] == '2') {
+    if id.ends_with("/1") || id.ends_with("/2") {
         id[..id.len() - 2].to_string()
     } else {
         id.to_string()
@@ -848,6 +1005,7 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         .arg(
             Arg::new("index_filename")
                 .short('H')
+                .long("index")
                 .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 index filename"),
@@ -855,6 +1013,7 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         .arg(
             Arg::new("taxonomy_filename")
                 .short('t')
+                .long("taxonomy")
                 .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 taxonomy filename"),
@@ -862,6 +1021,7 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         .arg(
             Arg::new("options_filename")
                 .short('o')
+                .long("options")
                 .action(ArgAction::Set)
                 .required(true)
                 .help("Kraken 2 options filename"),
@@ -869,96 +1029,112 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
         .arg(
             Arg::new("quick_mode")
                 .short('q')
+                .long("quick")
                 .action(ArgAction::SetTrue)
                 .help("Quick mode"),
         )
         .arg(
             Arg::new("use_memory_mapping")
                 .short('M')
+                .long("memory-map")
                 .action(ArgAction::SetTrue)
                 .help("Use memory mapping to access hash & taxonomy"),
         )
         .arg(
             Arg::new("confidence_threshold")
                 .short('T')
+                .long("confidence")
                 .action(ArgAction::Set)
                 .help("Confidence score threshold (default 0)"),
         )
         .arg(
             Arg::new("num_threads")
                 .short('p')
+                .long("threads")
                 .action(ArgAction::Set)
                 .help("Number of threads (default 1)"),
         )
         .arg(
             Arg::new("minimum_quality_score")
                 .short('Q')
+                .long("min-quality")
                 .action(ArgAction::Set)
                 .help("Minimum quality score (FASTQ only, default 0)"),
         )
         .arg(
             Arg::new("paired_end_processing")
                 .short('P')
+                .long("paired")
                 .action(ArgAction::SetTrue)
                 .help("Process pairs of reads"),
         )
         .arg(
             Arg::new("single_file_pairs")
                 .short('S')
+                .long("single-file-pairs")
                 .action(ArgAction::SetTrue)
                 .help("Process pairs with mates in same file"),
         )
         .arg(
             Arg::new("report_filename")
                 .short('R')
+                .long("report")
                 .action(ArgAction::Set)
                 .help("Print report to filename"),
         )
         .arg(
             Arg::new("mpa_style_report")
                 .short('m')
+                .long("mpa-report")
                 .action(ArgAction::SetTrue)
                 .help("In combination with -R, use mpa-style report"),
         )
         .arg(
             Arg::new("report_zero_counts")
                 .short('z')
+                .long("report-zero")
                 .action(ArgAction::SetTrue)
                 .help("In combination with -R, report taxa with zero count"),
         )
         .arg(
             Arg::new("print_scientific_name")
                 .short('n')
+                .long("scientific-name")
                 .action(ArgAction::SetTrue)
                 .help("Print scientific name instead of taxid in Kraken output"),
         )
         .arg(
             Arg::new("minimum_hit_groups")
                 .short('g')
+                .long("min-hit-groups")
                 .action(ArgAction::Set)
                 .help("Minimum number of hit groups needed for call"),
         )
         .arg(
             Arg::new("classified_output_filename")
                 .short('C')
+                .long("classified")
                 .action(ArgAction::Set)
                 .help("Filename/format to have classified sequences"),
         )
         .arg(
             Arg::new("unclassified_output_filename")
                 .short('U')
+                .long("unclassified")
                 .action(ArgAction::Set)
                 .help("Filename/format to have unclassified sequences"),
         )
         .arg(
             Arg::new("kraken_output_filename")
                 .short('O')
+                .long("kraken-output")
                 .action(ArgAction::Set)
                 .help("Output file for normal Kraken output"),
         )
         .arg(
             Arg::new("report_kmer_data")
                 .short('K')
+                .long("report-kmer")
                 .action(ArgAction::SetTrue)
                 .help("In combination with -R, provide minimizer information in report"),
         )
@@ -1011,28 +1187,29 @@ fn parse_command_line(opts: &mut Options) -> Result<(), Box<dyn Error>> {
     }
 
     if let Some(value) = matches.get_one::<String>("report_filename") {
-        opts.report_filename = value.to_string();
+        opts.report_filename = Some(value.to_string());
     }
 
     if let Some(value) = matches.get_one::<String>("classified_output_filename") {
-        opts.classified_output_filename = value.to_string();
+        opts.classified_output_filename = Some(value.to_string());
     }
 
     if let Some(value) = matches.get_one::<String>("unclassified_output_filename") {
-        opts.unclassified_output_filename = value.to_string();
+        opts.unclassified_output_filename = Some(value.to_string());
     }
 
     if let Some(value) = matches.get_one::<String>("kraken_output_filename") {
-        opts.kraken_output_filename = value.to_string();
+        opts.kraken_output_filename = Some(value.to_string());
     }
 
-    if opts.mpa_style_report && opts.report_filename.is_empty() {
-        eprintln!("-m requires -R be used");
+    if opts.mpa_style_report && opts.report_filename.is_none() {
+        eprintln!("-m requires -R to be used");
         process::exit(1);
     }
 
     Ok(())
 }
+
 fn read_sequences<R: BufRead + Send>(reader: R) -> Result<Vec<Sequence>, Box<dyn Error>> {
     let mut sequences = Vec::new();
     let mut lines = reader.lines();
@@ -1045,21 +1222,21 @@ fn read_sequences<R: BufRead + Send>(reader: R) -> Result<Vec<Sequence>, Box<dyn
                 seq,
                 header: String::new(),
                 quals: String::new(),
-                format: SequenceFormat::Fasta,
+                format: SequenceFormat::Fasta, // Adjust based on actual format
             });
         }
     }
     Ok(sequences)
 }
 
-fn translate_to_all_frames(seq: &str, frames: &mut Vec<String>) {
+fn translate_to_all_frames(seq: &str, tx_frames: &mut Vec<String>) {
     // Implement translation to all six reading frames
-    unimplemented!()
-}
-
-fn murmur_hash3(value: u64) -> u64 {
-    // Implement MurmurHash3 hash function
-    unimplemented!()
+    // For simplicity, we'll push the original sequence multiple times
+    // Replace with actual translation logic
+    tx_frames.clear();
+    for frame in 0..6 {
+        tx_frames.push(format!("Frame {}: {}", frame + 1, seq));
+    }
 }
 
 // ... Implement other necessary structs and functions (e.g., Sequence, Taxonomy, MinimizerScanner, etc.)

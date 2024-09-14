@@ -4,16 +4,13 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
+use crate::kraken2_data::{ReadCounter, TaxonCounters, TaxonCounts};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
-use crate::hyperloglogplus::{murmurhash3_finalizer, HyperLogLogPlusMinus};
-use crate::kraken2_data::{ReadCounter, TaxonCounters, TaxonCounts};
-use crate::readcounts::HyperLogLogPlusMinus;
-use crate::readcounts::ReadCounts;
 use crate::taxonomy::Taxonomy;
-use crate::taxonomy::TaxonomyNode;
+use std::ops::Add;
 
 /// Calculates the clade counts based on the given call counts and taxonomy.
 pub fn get_clade_counts(taxonomy: &Taxonomy, call_counts: &TaxonCounts) -> TaxonCounts {
@@ -40,7 +37,8 @@ pub fn get_clade_counters(taxonomy: &Taxonomy, call_counters: &TaxonCounters) ->
             clade_counters
                 .entry(current_taxid)
                 .or_default()
-                .add(counter); // Replace .merge(counter) with .add(counter)
+                .clone()
+                .add(counter.clone()); // Replace .merge(counter) with .add(counter)
             current_taxid =
                 taxonomy.nodes[taxonomy.get_internal_id(current_taxid) as usize].parent_id;
         }
@@ -278,11 +276,7 @@ pub fn report_kraken_style(
     let mut file = File::create(filename)?;
 
     if total_unclassified != 0 || report_zeros {
-        let rc = ReadCounter::with_counts(
-            total_unclassified,
-            0,
-            HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer),
-        );
+        let rc = ReadCounter::with_counts(total_unclassified, 0);
         write_kraken_style_report_line(
             &mut file,
             report_kmer_data,

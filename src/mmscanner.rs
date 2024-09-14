@@ -6,11 +6,11 @@
 
 use std::collections::VecDeque;
 
-const DEFAULT_TOGGLE_MASK: u64 = 0xe37e28c4271b5a2d;
-const DEFAULT_SPACED_SEED_MASK: u64 = 0;
-const BITS_PER_CHAR_DNA: usize = 2;
-const BITS_PER_CHAR_PRO: usize = 4;
-const CURRENT_REVCOM_VERSION: i32 = 1;
+pub const DEFAULT_TOGGLE_MASK: u64 = 0xe37e28c4271b5a2d;
+pub const DEFAULT_SPACED_SEED_MASK: u64 = 0;
+pub const BITS_PER_CHAR_DNA: usize = 2;
+pub const BITS_PER_CHAR_PRO: usize = 4;
+pub const CURRENT_REVCOM_VERSION: u32 = 1;
 
 pub struct MinimizerData {
     candidate: u64,

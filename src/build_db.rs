@@ -2,243 +2,240 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::process;
 use std::sync::{Arc, Mutex};
 
-use clap::Parser;
-use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
+use crate::compact_hash::CompactHashTable;
 
-use crate::compact_hash::{CompactHashTable, IndexOptions};
-use crate::kraken2_data::{CURRENT_REVCOM_VERSION, DEFAULT_SPACED_SEED_MASK, DEFAULT_TOGGLE_MASK};
-use crate::mmscanner::MinimizerScanner;
+use crate::kraken2_data::IndexOptions;
+use crate::kv_store::HValue;
+use crate::mmscanner::{
+    MinimizerScanner, CURRENT_REVCOM_VERSION, DEFAULT_SPACED_SEED_MASK, DEFAULT_TOGGLE_MASK,
+};
 use crate::seqreader::{BatchSequenceReader, Sequence};
 use crate::taxonomy::{NCBITaxonomy, TaxId, Taxonomy};
+use atty::{self, Stream};
+use clap::Parser;
+use libc::isatty;
+use rayon::prelude::*;
 
 const DEFAULT_BLOCK_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_SUBBLOCK_SIZE: usize = 1024;
 
-/// Kraken 2 Database Builder
+/// Kraken 2 Database Builder Options
 #[derive(Debug, Parser)]
-#[clap(version = "1.0", about = "Kraken 2 Database Builder")]
+#[command(
+    name = "Kraken 2 Database Builder",
+    version = "1.0",
+    about = "Builds Kraken 2 database"
+)]
 struct Options {
     /// Kraken 2 hash table filename
-    #[clap(short = 'H', long)]
+    #[arg(short = 'H')]
     hashtable_filename: String,
 
     /// Sequence ID to taxon map filename
-    #[clap(short = 'm', long)]
+    #[arg(short = 'm')]
     id_to_taxon_map_filename: String,
 
     /// Kraken 2 taxonomy filename
-    #[clap(short = 't', long)]
+    #[arg(short = 't')]
     taxonomy_filename: String,
 
     /// NCBI taxonomy directory name
-    #[clap(short = 'n', long)]
+    #[arg(short = 'n')]
     ncbi_taxonomy_directory: String,
 
     /// Kraken 2 options filename
-    #[clap(short = 'o', long)]
+    #[arg(short = 'o')]
     options_filename: String,
 
     /// Set length of k-mers
-    #[clap(short = 'k', long)]
-    k: usize,
+    #[arg(short = 'k')]
+    k: isize,
 
     /// Set length of minimizers
-    #[clap(short = 'l', long)]
-    l: usize,
+    #[arg(short = 'l')]
+    l: isize,
 
     /// Set capacity of hash table
-    #[clap(short = 'c', long)]
+    #[arg(short = 'c')]
     capacity: usize,
 
     /// Set maximum capacity of hash table (MiniKraken)
-    #[clap(short = 'M', long)]
-    maximum_capacity: Option<usize>,
+    #[arg(short = 'M', default_value_t = 0)]
+    maximum_capacity: usize,
 
     /// Spaced seed mask
-    #[clap(short = 'S', long)]
-    spaced_seed_mask: Option<String>,
+    #[arg(short = 'S', default_value_t = DEFAULT_SPACED_SEED_MASK)]
+    spaced_seed_mask: u64,
 
     /// Minimizer toggle mask
-    #[clap(short = 'T', long)]
-    toggle_mask: Option<String>,
+    #[arg(short = 'T', default_value_t = DEFAULT_TOGGLE_MASK)]
+    toggle_mask: u64,
 
     /// Input sequences are proteins
-    #[clap(short = 'X', long)]
+    #[arg(short = 'X', default_value_t = false)]
     input_is_protein: bool,
 
     /// Number of threads
-    #[clap(short = 'p', long, default_value = "1")]
+    #[arg(short = 'p', default_value_t = 1)]
     num_threads: usize,
 
     /// Use fast, nondeterministic building method
-    #[clap(short = 'F', long)]
+    #[arg(short = 'F')]
     nondeterministic_build: bool,
 
     /// Read block size
-    #[clap(short = 'B', long, default_value = "10485760")]
+    #[arg(short = 'B', default_value_t = DEFAULT_BLOCK_SIZE)]
     block_size: usize,
 
     /// Read subblock size
-    #[clap(short = 'b', long, default_value = "1024")]
+    #[arg(short = 'b', default_value_t = DEFAULT_SUBBLOCK_SIZE)]
     subblock_size: usize,
 
     /// Bit storage requested for taxid
-    #[clap(short = 'r', long, default_value = "0")]
+    #[arg(short = 'r', default_value_t = 0)]
     requested_bits_for_taxid: usize,
 }
 
 fn main() -> io::Result<()> {
     let opts = Options::parse();
 
-    // Set the number of threads for Rayon
     rayon::ThreadPoolBuilder::new()
         .num_threads(opts.num_threads)
         .build_global()
         .unwrap();
 
-    // Default values for spaced seed mask and toggle mask
-    let spaced_seed_mask = if let Some(s) = opts.spaced_seed_mask {
-        u64::from_str_radix(&s, 2).unwrap_or(DEFAULT_SPACED_SEED_MASK)
-    } else {
-        DEFAULT_SPACED_SEED_MASK
-    };
-
-    let toggle_mask = if let Some(s) = opts.toggle_mask {
-        u64::from_str_radix(&s, 2).unwrap_or(DEFAULT_TOGGLE_MASK)
-    } else {
-        DEFAULT_TOGGLE_MASK
-    };
-
-    // Validate options
+    if opts.k < 1 {
+        eprintln!("k must be positive integer");
+        process::exit(1);
+    }
+    if opts.l < 1 || opts.l > 31 {
+        eprintln!("l must be positive integer and no more than 31");
+        process::exit(1);
+    }
     if opts.k < opts.l {
-        eprintln!("Error: k cannot be less than l");
+        eprintln!("k cannot be less than l");
         process::exit(1);
     }
-
+    if opts.capacity < 1 {
+        eprintln!("Capacity must be positive integer");
+        process::exit(1);
+    }
     if opts.block_size < opts.subblock_size {
-        eprintln!("Error: Block size cannot be less than subblock size");
+        eprintln!("Block size cannot be less than subblock size");
+        process::exit(1);
+    }
+    if opts.maximum_capacity > 0 && opts.maximum_capacity > opts.capacity {
+        eprintln!("Maximum capacity option shouldn't specify larger capacity than normal");
         process::exit(1);
     }
 
-    if let Some(max_capacity) = opts.maximum_capacity {
-        if max_capacity > opts.capacity {
-            eprintln!("Error: Maximum capacity cannot be larger than capacity");
-            process::exit(1);
-        }
-    }
-
-    // Read ID to taxon map
-    let id_to_taxon_map = read_id_to_taxon_map(&opts.id_to_taxon_map_filename)?;
-
-    // Generate taxonomy
+    let mut id_to_taxon_map = HashMap::new();
+    read_id_to_taxon_map(&mut id_to_taxon_map, &opts.id_to_taxon_map_filename)?;
     generate_taxonomy(&opts, &id_to_taxon_map)?;
 
     eprintln!("Taxonomy parsed and converted.");
 
-    // Load taxonomy
-    let mut taxonomy = Taxonomy::new(&opts.taxonomy_filename)?;
+    let mut taxonomy = Taxonomy::new(&opts.taxonomy_filename, false)?;
     taxonomy.generate_external_to_internal_id_map();
-
     let mut bits_needed_for_value = 1;
-    while (1 << bits_needed_for_value) < taxonomy.node_count() {
+    while (1 << bits_needed_for_value) < taxonomy.node_count as usize {
         bits_needed_for_value += 1;
     }
-
     if opts.requested_bits_for_taxid > 0 && bits_needed_for_value > opts.requested_bits_for_taxid {
-        eprintln!("Error: More bits required for storing taxid");
+        eprintln!("More bits required for storing taxid");
         process::exit(1);
     }
 
-    let bits_for_taxid = std::cmp::max(bits_needed_for_value, opts.requested_bits_for_taxid);
+    let bits_for_taxid = if bits_needed_for_value < opts.requested_bits_for_taxid {
+        opts.requested_bits_for_taxid
+    } else {
+        bits_needed_for_value
+    };
 
-    let actual_capacity = if let Some(max_capacity) = opts.maximum_capacity {
-        max_capacity
+    let actual_capacity = if opts.maximum_capacity > 0 {
+        let frac = opts.maximum_capacity as f64 / opts.capacity as f64;
+        if frac > 1.0 {
+            eprintln!("Maximum capacity larger than requested capacity");
+            process::exit(1);
+        }
+        opts.maximum_capacity
     } else {
         opts.capacity
     };
 
-    let min_clear_hash_value = if let Some(max_capacity) = opts.maximum_capacity {
-        let frac = max_capacity as f64 / opts.capacity as f64;
+    let min_clear_hash_value = if opts.maximum_capacity > 0 {
+        let frac = opts.maximum_capacity as f64 / opts.capacity as f64;
         ((1.0 - frac) * u64::MAX as f64) as u64
     } else {
         0
     };
 
-    let kraken_index = Arc::new(Mutex::new(CompactHashTable::new(
-        actual_capacity,
-        32 - bits_for_taxid,
-        bits_for_taxid,
-    )?));
+    let kraken_table = CompactHashTable::new(actual_capacity, 32 - bits_for_taxid, bits_for_taxid)?;
+    let kraken_index = Arc::new(Mutex::new(kraken_table));
 
     eprintln!(
-        "CompactHashTable created with {} bits reserved for taxid.",
+        "CHT created with {} bits reserved for taxid.",
         bits_for_taxid
     );
 
-    if !opts.nondeterministic_build {
-        process_sequences(
-            &opts,
-            &id_to_taxon_map,
-            &kraken_index,
-            &taxonomy,
-            spaced_seed_mask,
-            toggle_mask,
-            min_clear_hash_value,
-        )?;
-    } else {
+    let taxonomy = Arc::new(taxonomy);
+
+    if opts.nondeterministic_build {
         process_sequences_fast(
             &opts,
             &id_to_taxon_map,
             &kraken_index,
             &taxonomy,
-            spaced_seed_mask,
-            toggle_mask,
+            min_clear_hash_value,
+        )?;
+    } else {
+        process_sequences(
+            &opts,
+            &id_to_taxon_map,
+            &kraken_index,
+            &taxonomy,
             min_clear_hash_value,
         )?;
     }
 
-    eprintln!("Writing data to disk... ");
+    eprint!("Writing data to disk... ");
     kraken_index
         .lock()
         .unwrap()
         .write_table(&opts.hashtable_filename)?;
 
-    // Write index options
     let index_opts = IndexOptions {
-        k: opts.k as u32,
-        l: opts.l as u32,
-        spaced_seed_mask,
-        toggle_mask,
+        k: opts.k as usize,
+        l: opts.l as usize,
+        spaced_seed_mask: opts.spaced_seed_mask,
+        toggle_mask: opts.toggle_mask,
         dna_db: !opts.input_is_protein,
         minimum_acceptable_hash_value: min_clear_hash_value,
         revcom_version: CURRENT_REVCOM_VERSION,
         db_version: 0,
         db_type: 0,
     };
-
     let mut opts_fs = OpenOptions::new()
         .write(true)
         .create(true)
         .open(&opts.options_filename)?;
     opts_fs.write_all(&bincode::serialize(&index_opts).unwrap())?;
     opts_fs.flush()?;
-
-    eprintln!("Complete.");
+    eprintln!(" complete.");
 
     Ok(())
 }
 
+// The rest of your code remains the same, with adjustments as per the solutions above.
+// Make sure to adjust function signatures, implement Clone, and handle lifetimes as needed.
 // Function to read the ID to taxon map
-fn read_id_to_taxon_map(filename: &str) -> io::Result<HashMap<String, TaxId>> {
+fn read_id_to_taxon_map(id_map: &mut HashMap<String, TaxId>, filename: &str) -> io::Result<()> {
     let file = File::open(filename)?;
     let reader = BufReader::new(file);
-    let mut id_map = HashMap::new();
-
     for line in reader.lines() {
         let line = line?;
         let mut parts = line.trim().split_whitespace();
@@ -249,8 +246,7 @@ fn read_id_to_taxon_map(filename: &str) -> io::Result<HashMap<String, TaxId>> {
             }
         }
     }
-
-    Ok(id_map)
+    Ok(())
 }
 
 // Function to generate the taxonomy
@@ -276,8 +272,6 @@ fn process_sequences(
     id_to_taxon_map: &HashMap<String, TaxId>,
     kraken_index: &Arc<Mutex<CompactHashTable>>,
     taxonomy: &Taxonomy,
-    spaced_seed_mask: u64,
-    toggle_mask: u64,
     min_clear_hash_value: u64,
 ) -> io::Result<()> {
     let mut processed_seq_ct = 0;
@@ -287,8 +281,12 @@ fn process_sequences(
     let reader = stdin.lock();
 
     let mut sequence_reader = BatchSequenceReader::new(reader, opts.block_size);
+    sequence_reader.set_reader(Box::new(reader));
+    sequence_reader.set_block_size(opts.block_size);
 
-    while let Some(sequence) = sequence_reader.next_sequence()? {
+    let mut sequence = Sequence::new();
+
+    while sequence_reader.next_sequence(&mut sequence) {
         let all_sequence_ids = extract_ncbi_sequence_ids(&sequence.header);
         let mut taxid = 0;
 
@@ -315,8 +313,6 @@ fn process_sequences(
                 taxid,
                 kraken_index,
                 taxonomy,
-                spaced_seed_mask,
-                toggle_mask,
                 min_clear_hash_value,
             );
 
@@ -324,7 +320,7 @@ fn process_sequences(
             processed_ch_ct += seq.len();
         }
 
-        if atty::is(atty::Stream::Stderr) {
+        if atty::is(Stream::Stderr) {
             eprint!(
                 "\rProcessed {} sequences ({} {})...",
                 processed_seq_ct,
@@ -334,7 +330,7 @@ fn process_sequences(
         }
     }
 
-    if atty::is(atty::Stream::Stderr) {
+    if atty::is(Stream::Stderr) {
         eprint!("\r");
     }
 
@@ -354,8 +350,6 @@ fn process_sequences_fast(
     id_to_taxon_map: &HashMap<String, TaxId>,
     kraken_index: &Arc<Mutex<CompactHashTable>>,
     taxonomy: &Taxonomy,
-    spaced_seed_mask: u64,
-    toggle_mask: u64,
     min_clear_hash_value: u64,
 ) -> io::Result<()> {
     let processed_seq_ct = Arc::new(Mutex::new(0usize));
@@ -365,11 +359,18 @@ fn process_sequences_fast(
     let reader = stdin.lock();
 
     let id_to_taxon_map = Arc::new(id_to_taxon_map.clone());
-    let taxonomy = Arc::new(taxonomy.clone());
+    let taxonomy = Arc::new(taxonomy);
 
-    let sequence_reader = BatchSequenceReader::new(reader, opts.block_size);
+    let mut sequence_reader = BatchSequenceReader::new(reader, opts.block_size);
+    sequence_reader.set_reader(Box::new(reader));
+    sequence_reader.set_block_size(opts.block_size);
 
-    let sequences = sequence_reader.read_all_sequences()?;
+    let mut sequences = Vec::new();
+    let mut sequence = Sequence::new();
+
+    while sequence_reader.next_sequence(&mut sequence) {
+        sequences.push(sequence.clone());
+    }
 
     sequences.into_par_iter().for_each(|sequence| {
         let all_sequence_ids = extract_ncbi_sequence_ids(&sequence.header);
@@ -391,26 +392,29 @@ fn process_sequences_fast(
                 sequence.seq.clone()
             };
 
+            let mut scanner = MinimizerScanner::new(
+                opts.k,
+                opts.l,
+                opts.spaced_seed_mask,
+                !opts.input_is_protein,
+                opts.toggle_mask,
+                CURRENT_REVCOM_VERSION,
+            );
+
             process_sequence_fast(
                 &seq,
                 taxid,
                 kraken_index.clone(),
                 taxonomy.clone(),
-                opts.k,
-                opts.l,
-                spaced_seed_mask,
-                toggle_mask,
+                &mut scanner,
                 min_clear_hash_value,
-                opts.input_is_protein,
             );
 
             let mut seq_ct = processed_seq_ct.lock().unwrap();
             *seq_ct += 1;
-            drop(seq_ct);
 
             let mut ch_ct = processed_ch_ct.lock().unwrap();
             *ch_ct += seq.len();
-            drop(ch_ct);
         }
     });
 
@@ -434,18 +438,21 @@ fn process_sequence(
     taxid: TaxId,
     kraken_index: &Arc<Mutex<CompactHashTable>>,
     taxonomy: &Taxonomy,
-    spaced_seed_mask: u64,
-    toggle_mask: u64,
     min_clear_hash_value: u64,
 ) {
     let set_ct = 256;
-    let mut locks = vec![Mutex::new(()); set_ct];
+    let locks: Vec<Mutex<()>> = (0..set_ct).map(|_| Mutex::new(())).collect();
 
     for j in (0..seq.len()).step_by(opts.block_size) {
         let block_start = j;
-        let block_finish = std::cmp::min(j + opts.block_size + opts.k - 1, seq.len());
+        let block_finish = std::cmp::min(j + opts.block_size + opts.k as usize - 1, seq.len());
 
-        let mut minimizer_sets: Vec<HashSet<u64>> = vec![HashSet::new(); set_ct];
+        let minimizer_sets: Vec<Mutex<HashSet<u64>>> =
+            (0..set_ct).map(|_| Mutex::new(HashSet::new())).collect();
+        // In the closure:
+        let set = &minimizer_sets[zone];
+        let mut set_guard = set.lock().unwrap();
+        set_guard.insert(minimizer);
 
         // Process subblocks in parallel
         (block_start..block_finish)
@@ -453,16 +460,17 @@ fn process_sequence(
             .step_by(opts.subblock_size)
             .for_each(|i| {
                 let subblock_finish =
-                    std::cmp::min(i + opts.subblock_size + opts.k - 1, block_finish);
+                    std::cmp::min(i + opts.subblock_size + opts.k as usize - 1, block_finish);
 
                 let mut scanner = MinimizerScanner::new(
                     opts.k,
                     opts.l,
-                    spaced_seed_mask,
+                    opts.spaced_seed_mask,
                     !opts.input_is_protein,
-                    toggle_mask,
+                    opts.toggle_mask,
+                    CURRENT_REVCOM_VERSION,
                 );
-                scanner.load_sequence(&seq[i..subblock_finish]);
+                scanner.load_sequence(seq, i, subblock_finish);
 
                 while let Some(minimizer) = scanner.next_minimizer() {
                     if scanner.is_ambiguous() {
@@ -486,6 +494,7 @@ fn process_sequence(
             minimizer_list.extend(vec);
         }
 
+        // Deterministic order
         minimizer_list.sort_unstable();
         minimizer_list.dedup();
 
@@ -502,27 +511,21 @@ fn process_sequence(
 }
 
 // Function to process a single sequence nondeterministically
-fn process_sequence_fast(
-    seq: &str,
+fn process_sequence_fast<'a>(
+    seq: &'a str,
     taxid: TaxId,
     kraken_index: Arc<Mutex<CompactHashTable>>,
     taxonomy: Arc<Taxonomy>,
-    k: usize,
-    l: usize,
-    spaced_seed_mask: u64,
-    toggle_mask: u64,
+    scanner: &mut MinimizerScanner<'a>,
     min_clear_hash_value: u64,
-    input_is_protein: bool,
 ) {
-    let mut scanner = MinimizerScanner::new(k, l, spaced_seed_mask, !input_is_protein, toggle_mask);
-    scanner.load_sequence(seq);
+    scanner.load_sequence(seq, 0, seq.len());
 
     while let Some(minimizer) = scanner.next_minimizer() {
         if scanner.is_ambiguous() {
             continue;
         }
-        let hc = murmur_hash3(minimizer);
-        if min_clear_hash_value != 0 && hc < min_clear_hash_value {
+        if min_clear_hash_value != 0 && murmur_hash3(minimizer) < min_clear_hash_value {
             continue;
         }
         set_minimizer_lca(
@@ -578,7 +581,11 @@ fn set_minimizer_lca(
     let mut existing_taxid = 0;
     let mut new_taxid = taxid;
 
-    while !kraken_index.compare_and_set(minimizer, new_taxid as u64, &mut existing_taxid) {
+    while !kraken_index.compare_and_set(
+        minimizer,
+        (new_taxid as HValue).into(),
+        &mut existing_taxid,
+    ) {
         new_taxid = taxonomy.lowest_common_ancestor(new_taxid, existing_taxid as TaxId);
     }
 }
@@ -586,6 +593,5 @@ fn set_minimizer_lca(
 // Placeholder for murmur_hash3 function
 fn murmur_hash3(key: u64) -> u64 {
     // Implement MurmurHash3 here
-    // This is a placeholder implementation
-    key
+    key // Placeholder implementation
 }

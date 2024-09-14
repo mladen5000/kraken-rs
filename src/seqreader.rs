@@ -7,13 +7,14 @@ pub enum SequenceFormat {
     Fastq,
 }
 
+#[derive(Clone)]
 pub struct Sequence {
     pub format: SequenceFormat,
     pub header: String, // Header line, including @/>, but not newline
     pub id: String,     // From first char after @/> up to first whitespace
     pub seq: String,
     pub quals: String, // Only meaningful for FASTQ sequences
-    str_representation: String,
+    pub str_representation: String,
 }
 
 impl Sequence {
@@ -49,18 +50,22 @@ impl Sequence {
     }
 }
 
-pub struct BatchSequenceReader {
+pub struct BatchSequenceReader<R: Read> {
+    reader: BufReader<R>,
+    block_size: usize,
     buffer: String,
     file_format: SequenceFormat,
     block_buffer: Vec<u8>,
 }
 
-impl BatchSequenceReader {
-    pub fn new() -> Self {
+impl<R: Read> BatchSequenceReader<R> {
+    pub fn new(reader: R, block_size: usize) -> Self {
         Self {
-            buffer: String::with_capacity(8192),
+            reader: BufReader::new(reader),
+            block_size,
+            buffer: String::with_capacity(block_size),
             file_format: SequenceFormat::AutoDetect,
-            block_buffer: vec![0; 8192],
+            block_buffer: vec![0; block_size],
         }
     }
 

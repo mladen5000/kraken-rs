@@ -4,7 +4,6 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
-use std::fmt::Debug;
 
 pub type HKey = u64;
 pub type HValue = u32;
