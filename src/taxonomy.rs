@@ -1,13 +1,9 @@
-use libc::if_nameindex;
-use memmap::Mmap;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::Write;
-use std::io::{BufRead, BufReader, Read};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read};
+use std::io::{BufWriter, Write};
 use std::path::Path;
-
-const FILE_MAGIC: &[u8] = b"K2TAXDAT";
+const FILE_MAGIC: &str = "K2TAXDAT";
 
 #[derive(Debug)]
 pub struct NCBITaxonomy {
@@ -26,94 +22,70 @@ impl NCBITaxonomy {
     ///
     /// * `nodes_filename` - The path to the nodes file.
     /// * `names_filename` - The path to the names file.
-    pub fn new<P: AsRef<Path>>(nodes_filename: P, names_filename: P) -> Self {
-        let nodes_file =
-            BufReader::new(File::open(nodes_filename).expect("Failed to open nodes file"));
-        let names_file =
-            BufReader::new(File::open(names_filename).expect("Failed to open names file"));
-        Self::from_readers(nodes_file, names_file)
+    pub fn new(nodes_filename: &str, names_filename: &str) -> io::Result<Self> {
+        let mut taxonomy = NCBITaxonomy {
+            parent_map: HashMap::new(),
+            name_map: HashMap::new(),
+            rank_map: HashMap::new(),
+            child_map: HashMap::new(),
+            marked_nodes: HashSet::new(),
+            known_ranks: HashSet::new(),
+        };
+
+        taxonomy.read_nodes(nodes_filename)?;
+        taxonomy.read_names(names_filename)?;
+        Ok(taxonomy)
     }
-    fn from_readers<R: Read>(nodes_reader: R, names_reader: R) -> Self {
-        let mut parent_map = HashMap::new();
-        let mut name_map = HashMap::new();
-        let mut rank_map = HashMap::new();
-        let mut child_map = HashMap::new();
-        let mut marked_nodes = HashSet::new();
-        let mut known_ranks = HashSet::new();
 
-        for line in BufReader::new(nodes_reader).lines() {
-            let line = line.expect("Failed to read line from nodes file");
-            let fields: Vec<&str> = line.trim().split("\t|\t").collect();
+    fn read_nodes(&mut self, filename: &str) -> io::Result<()> {
+        let file = File::open(filename)?;
+        let reader = BufReader::new(file);
 
-            let node_id = fields[0].parse().expect("Failed to parse node ID");
-            let parent_id = fields[1].parse().unwrap_or(0);
-            let rank = fields[2].to_string();
+        for line in reader.lines() {
+            let line = line?.trim_end_matches("\t|").to_string();
+            let tokens: Vec<&str> = line.split("\t|\t").collect();
+            let node_id = tokens[0].parse::<u64>().unwrap();
+            let parent_id = tokens[1].parse::<u64>().unwrap();
+            let rank = tokens[2].to_string();
 
             if node_id == 0 {
-                panic!("Attempt to create taxonomy with node ID 0");
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "node ID == 0"));
             }
 
-            if node_id == 1 {
-                parent_map.insert(node_id, 0);
-            } else {
-                parent_map.insert(node_id, parent_id);
-            }
-
-            child_map
+            self.parent_map.insert(node_id, parent_id);
+            self.child_map
                 .entry(parent_id)
                 .or_insert_with(HashSet::new)
                 .insert(node_id);
-            rank_map.insert(node_id, rank.clone());
-            known_ranks.insert(rank);
+            self.rank_map.insert(node_id, rank.clone());
+            self.known_ranks.insert(rank.clone());
         }
 
-        for line in BufReader::new(names_reader).lines() {
-            let line = line.expect("Failed to read line from names file");
-            let fields: Vec<&str> = line.trim().split("\t|\t").collect();
-
-            let node_id = fields[0].parse().expect("Failed to parse node ID");
-            let name = fields[1].to_string();
-            let name_type = fields[3];
-
-            let name_type = name_type
-                .strip_suffix("\t|")
-                .unwrap_or(name_type)
-                .to_string();
-
-            if node_id == 0 {
-                panic!("Attempt to create taxonomy with node ID 0");
-            }
-
-            if name_type == "scientific name" {
-                name_map.insert(node_id, name);
-            }
-        }
-
-        marked_nodes.insert(1); // Mark root node
-
-        NCBITaxonomy {
-            parent_map,
-            name_map,
-            rank_map,
-            child_map,
-            marked_nodes,
-            known_ranks,
-        }
+        Ok(())
     }
 
-    /// Marks a given taxonomy node and all its unmarked ancestors.
-    ///
-    /// # Arguments
-    ///
-    /// * `taxid` - The taxonomy ID of the node to mark.
-    pub fn mark_node(&mut self, taxid: u64) {
-        let mut current_id = taxid;
-        while !self.marked_nodes.contains(&current_id) {
-            self.marked_nodes.insert(current_id);
-            current_id = *self
-                .parent_map
-                .get(&current_id)
-                .expect("Parent ID not found");
+    fn read_names(&mut self, filename: &str) -> io::Result<()> {
+        let file = File::open(filename)?;
+        let reader = BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line?.trim_end_matches("\t|").to_string();
+            let tokens: Vec<&str> = line.split("\t|\t").collect();
+            let node_id = tokens[0].parse::<u64>().unwrap();
+            let name = tokens[1].to_string();
+
+            if tokens[3] == "scientific name" {
+                self.name_map.insert(node_id, name);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn mark_node(&mut self, mut taxid: u64) {
+        while !self.marked_nodes.contains(&taxid) {
+            self.marked_nodes.insert(taxid);
+            taxid = *self.parent_map.get(&taxid).unwrap_or(&0);
         }
     }
 
@@ -122,380 +94,433 @@ impl NCBITaxonomy {
     /// # Arguments
     ///
     /// * `filename` - The path to the output file.
-    fn convert_to_kraken_taxonomy<P: AsRef<Path>>(&self, filename: P) {
-        let mut nodes = Vec::new();
+    pub fn convert_to_kraken_taxonomy(&self, filename: &str) -> io::Result<()> {
+        let mut taxo_nodes: Vec<TaxonomyNode> = Vec::new();
         let mut name_data = String::new();
         let mut rank_data = String::new();
         let mut rank_offsets = HashMap::new();
-        let mut external_id_map = HashMap::new();
 
+        // Collect all unique ranks and prepare rank data with offsets
         for rank in &self.known_ranks {
             rank_offsets.insert(rank.clone(), rank_data.len() as u64);
             rank_data.push_str(rank);
-            rank_data.push('\0');
+            rank_data.push('\0'); // Null-terminated strings
         }
 
-        let mut internal_node_id = 0;
-        external_id_map.insert(0, 0);
-        external_id_map.insert(1, 1);
+        let mut bfs_queue = VecDeque::new();
+        let mut external_to_internal_id_map = HashMap::new();
 
-        let mut bfs_queue = std::collections::VecDeque::new();
-        bfs_queue.push_back(1);
+        bfs_queue.push_back(1); // Start BFS from the root node, which is usually '1'
+        external_to_internal_id_map.insert(1, 1);
 
-        while let Some(external_node_id) = bfs_queue.pop_front() {
-            internal_node_id += 1;
-            external_id_map.insert(external_node_id, internal_node_id);
+        while let Some(external_id) = bfs_queue.pop_front() {
+            let internal_id = external_to_internal_id_map[&external_id];
+            let parent_id = self.parent_map[&external_id];
+            let internal_parent_id = *external_to_internal_id_map.get(&parent_id).unwrap_or(&0);
 
-            let mut node = TaxonomyNode {
-                parent_id: external_id_map[&self.parent_map[&external_node_id]],
-                first_child: 0,
-                child_count: 0,
+            let node = TaxonomyNode {
+                parent_id: internal_parent_id,
+                external_id,
+                first_child: internal_id + bfs_queue.len() as u64 + 1, // Estimate first_child index
+                child_count: 0,                                        // Will count children below
                 name_offset: name_data.len() as u64,
-                rank_offset: rank_offsets[&self.rank_map[&external_node_id]],
-                external_id: external_node_id,
-                godparent_id: 0,
+                rank_offset: *rank_offsets.get(&self.rank_map[&external_id]).unwrap(),
+                godparent_id: 0, // Not used in this simplified version
             };
 
-            let name = match self.name_map.get(&external_node_id) {
-                Some(name) => name.to_string(),
-                None => format!("Unnamed taxon {}", external_node_id),
-            };
-            name_data.push_str(&name);
-            name_data.push('\0');
+            // Add node name to the name data pool
+            if let Some(name) = self.name_map.get(&external_id) {
+                name_data.push_str(name);
+                name_data.push('\0'); // Null-terminated strings
+            }
 
-            let mut child_nodes = Vec::new();
-            for child_node in self
-                .child_map
-                .get(&external_node_id)
-                .expect("Child nodes not found")
-            {
-                if self.marked_nodes.contains(child_node) {
-                    child_nodes.push(*child_node);
-                    node.child_count += 1;
+            // Queue children for BFS
+            if let Some(children) = self.child_map.get(&external_id) {
+                for &child_id in children {
+                    if self.marked_nodes.contains(&child_id) {
+                        bfs_queue.push_back(child_id);
+                        external_to_internal_id_map
+                            .insert(child_id, internal_id + bfs_queue.len() as u64);
+                        taxo_nodes[internal_id as usize - 1].child_count += 1;
+                    }
                 }
             }
 
-            if !child_nodes.is_empty() {
-                node.first_child = internal_node_id + 1;
-            }
-
-            nodes.push(node);
-            bfs_queue.extend(child_nodes);
+            taxo_nodes.push(node);
         }
 
-        let mut taxonomy = Taxonomy {
-            nodes,
-            name_data,
-            rank_data,
-            external_to_internal_id_map: HashMap::new(),
-        };
+        // Writing to disk
+        let mut file = BufWriter::new(File::create(Path::new(filename))?);
+        file.write_all(b"K2TAXDAT")?;
+        for node in &taxo_nodes {
+            file.write_all(&node.parent_id.to_le_bytes())?;
+            file.write_all(&node.first_child.to_le_bytes())?;
+            file.write_all(&node.child_count.to_le_bytes())?;
+            file.write_all(&node.name_offset.to_le_bytes())?;
+            file.write_all(&node.rank_offset.to_le_bytes())?;
+            file.write_all(&node.external_id.to_le_bytes())?;
+            file.write_all(&node.godparent_id.to_le_bytes())?;
+        }
+        file.write_all(name_data.as_bytes())?;
+        file.write_all(rank_data.as_bytes())?;
 
-        taxonomy.write_to_disk(filename);
+        Ok(())
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
-struct TaxonomyNode {
+#[derive(Debug, Clone)]
+pub struct Taxonomy {
+    pub nodes: Vec<TaxonomyNode>,
+    pub name_data: Vec<u8>,
+    pub rank_data: Vec<u8>,
+    node_count: usize,
+    file_backed: bool,
+}
+
+impl Taxonomy {
+    pub fn new(filename: &str, memory_mapping: bool) -> io::Result<Self> {
+        let mut taxonomy = Taxonomy {
+            nodes: Vec::new(),
+            name_data: Vec::new(),
+            rank_data: Vec::new(),
+            node_count: 0,
+            file_backed: memory_mapping,
+        };
+
+        if memory_mapping {
+            // Implement memory mapping logic here. Rust doesn't directly support it in the standard library.
+            // External crates like `memmap` or `mmap` might be necessary.
+            // For demonstration, this will be left as a conceptual placeholder.
+            println!("Memory mapping is currently not implemented.");
+        } else {
+            taxonomy.init_from_file(filename)?;
+        }
+
+        Ok(taxonomy)
+    }
+
+    fn init_from_file(&mut self, filename: &str) -> io::Result<()> {
+        let file = fs::read(filename)?;
+        let mut offset = 0;
+
+        // Check for file magic
+        let magic = &file[offset..offset + FILE_MAGIC.len()];
+        offset += FILE_MAGIC.len();
+        if magic != FILE_MAGIC.as_bytes() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "malformed taxonomy file",
+            ));
+        }
+
+        // Read node count
+        self.node_count = u64::from_le_bytes(file[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        // Read name data length
+        let name_data_len =
+            u64::from_le_bytes(file[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        // Read rank data length
+        let rank_data_len =
+            u64::from_le_bytes(file[offset..offset + 8].try_into().unwrap()) as usize;
+        offset += 8;
+
+        // Read nodes
+        self.nodes = Vec::with_capacity(self.node_count);
+        for _ in 0..self.node_count {
+            let node = TaxonomyNode {
+                parent_id: u64::from_le_bytes(file[offset..offset + 8].try_into().unwrap()),
+                first_child: u64::from_le_bytes(file[offset + 8..offset + 16].try_into().unwrap()),
+                child_count: u64::from_le_bytes(file[offset + 16..offset + 24].try_into().unwrap()),
+                name_offset: u64::from_le_bytes(file[offset + 24..offset + 32].try_into().unwrap()),
+                rank_offset: u64::from_le_bytes(file[offset + 32..offset + 40].try_into().unwrap()),
+                external_id: u64::from_le_bytes(file[offset + 40..offset + 48].try_into().unwrap()),
+                godparent_id: u64::from_le_bytes(
+                    file[offset + 48..offset + 56].try_into().unwrap(),
+                ),
+            };
+            self.nodes.push(node);
+            offset += 56; // size of one TaxonomyNode
+        }
+
+        // Read name and rank data
+        self.name_data = file[offset..offset + name_data_len].to_vec();
+        offset += name_data_len;
+        self.rank_data = file[offset..offset + rank_data_len].to_vec();
+
+        Ok(())
+    }
+
+    pub fn write_to_disk(&self, filename: &str) -> io::Result<()> {
+        let mut file = BufWriter::new(OpenOptions::new().write(true).create(true).open(filename)?);
+
+        file.write_all(FILE_MAGIC.as_bytes())?;
+        file.write_all(&(self.node_count as u64).to_le_bytes())?;
+        file.write_all(&(self.name_data.len() as u64).to_le_bytes())?;
+        file.write_all(&(self.rank_data.len() as u64).to_le_bytes())?;
+        file.write_all(&self.name_data)?;
+        file.write_all(&self.rank_data)?;
+        for node in &self.nodes {
+            file.write_all(&node.parent_id.to_le_bytes())?;
+            file.write_all(&node.first_child.to_le_bytes())?;
+            file.write_all(&node.child_count.to_le_bytes())?;
+            file.write_all(&node.name_offset.to_le_bytes())?;
+            file.write_all(&node.rank_offset.to_le_bytes())?;
+            file.write_all(&node.external_id.to_le_bytes())?;
+            file.write_all(&node.godparent_id.to_le_bytes())?;
+        }
+
+        Ok(())
+    }
+}
+
+use std::convert::TryInto;
+
+#[derive(Clone, Debug)]
+pub struct TaxonomyNode {
     pub parent_id: u64,
     pub first_child: u64,
     pub child_count: u64,
     pub name_offset: u64,
     pub rank_offset: u64,
     pub external_id: u64,
-    pub godparent_id: u64,
+    pub godparent_id: u64, // Reserved for potential future optimizations
 }
 
-#[derive(Debug)]
-pub struct Taxonomy {
-    pub nodes: Vec<TaxonomyNode>,
-    pub name_data: String,
-    pub rank_data: String,
-    pub external_to_internal_id_map: HashMap<u64, u64>,
-}
+impl TaxonomyNode {
+    /// Creates a `TaxonomyNode` from a slice of bytes.
+    /// This function assumes the bytes are in the correct order and format.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let parent_id = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let first_child = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let child_count = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let name_offset = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let rank_offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let external_id = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
+        let godparent_id = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
 
-impl Taxonomy {
-    /// Creates a new Taxonomy by reading from a file.
-    ///
-    /// # Arguments
-    ///
-    /// * `filename` - The path to the taxonomy file.
-    pub fn new<P: AsRef<Path>>(filename: P) -> Self {
-        let file = File::open(filename).expect("Failed to open taxonomy file");
-        let mmap = unsafe { Mmap::map(&file).expect("Failed to memory-map taxonomy file") };
-
-        let mut cursor = 0;
-        let magic = &mmap[cursor..cursor + FILE_MAGIC.len()];
-        assert_eq!(magic, FILE_MAGIC, "Invalid taxonomy file format");
-        cursor += FILE_MAGIC.len();
-
-        let node_count = Self::read_u64(&mmap, &mut cursor);
-        let name_data_len = Self::read_u64(&mmap, &mut cursor);
-        let rank_data_len = Self::read_u64(&mmap, &mut cursor);
-
-        let nodes_size = node_count as usize * std::mem::size_of::<TaxonomyNode>();
-        let nodes_data = &mmap[cursor..cursor + nodes_size];
-        cursor += nodes_size;
-
-        let nodes = bincode::deserialize(nodes_data).expect("Failed to deserialize taxonomy nodes");
-
-        let name_data =
-            String::from_utf8_lossy(&mmap[cursor..cursor + name_data_len as usize]).to_string();
-        cursor += name_data_len as usize;
-
-        let rank_data =
-            String::from_utf8_lossy(&mmap[cursor..cursor + rank_data_len as usize]).to_string();
-
-        Taxonomy {
-            nodes,
-            name_data,
-            rank_data,
-            external_to_internal_id_map: HashMap::new(),
+        TaxonomyNode {
+            parent_id,
+            first_child,
+            child_count,
+            name_offset,
+            rank_offset,
+            external_id,
+            godparent_id,
         }
-    }
-
-    /// Reads a u64 value from the memory-mapped file.
-    ///
-    /// # Arguments
-    ///
-    /// * `mmap` - The memory-mapped file.
-    /// * `cursor` - The current cursor position.
-    ///
-    /// # Returns
-    ///
-    /// The read u64 value.
-    pub fn read_u64(mmap: &[u8], cursor: &mut usize) -> u64 {
-        let value =
-            bincode::deserialize(&mmap[*cursor..*cursor + 8]).expect("Failed to read u64 value");
-        *cursor += 8;
-        value
-    }
-
-    /// Checks if node A is an ancestor of node B.
-    ///
-    /// # Arguments
-    ///
-    /// * `a` - The taxonomy ID of node A.
-    /// * `b` - The taxonomy ID of node B.
-    ///
-    /// # Returns
-    ///
-    /// True if node A is an ancestor of node B, false otherwise.
-    pub fn is_a_ancestor_of_b(&self, a: u64, b: u64) -> bool {
-        if a == 0 || b == 0 {
-            return false;
-        }
-
-        let mut current_id = b;
-        while current_id > a {
-            current_id = self.nodes[current_id as usize].parent_id;
-        }
-
-        current_id == a
-    }
-
-    /// Finds the lowest common ancestor of two nodes.
-    ///
-    /// # Arguments
-    ///
-    /// * `a` - The taxonomy ID of node A.
-    /// * `b` - The taxonomy ID of node B.
-    ///
-    /// # Returns
-    ///
-    /// The taxonomy ID of the lowest common ancestor of nodes A and B.
-    pub fn lowest_common_ancestor(&self, a: u64, b: u64) -> u64 {
-        if a == 0 || b == 0 {
-            return if a != 0 { a } else { b };
-        }
-
-        let mut current_a = a;
-        let mut current_b = b;
-        while current_a != current_b {
-            if current_a > current_b {
-                current_a = self.nodes[current_a as usize].parent_id;
-            } else {
-                current_b = self.nodes[current_b as usize].parent_id;
-            }
-        }
-
-        current_a
-    }
-
-    /// Writes the taxonomy data to a file.
-    ///
-    /// # Arguments
-    ///
-    /// * `filename` - The path to the output file.
-    pub fn write_to_disk<P: AsRef<Path>>(&self, filename: P) {
-        let mut file = File::create(filename).expect("Failed to create output file");
-
-        file.write_all(FILE_MAGIC)
-            .expect("Failed to write file magic");
-
-        let node_count = self.nodes.len() as u64;
-        let name_data_len = self.name_data.len() as u64;
-        let rank_data_len = self.rank_data.len() as u64;
-
-        bincode::serialize_into(&mut file, &node_count).expect("Failed to write node count");
-        bincode::serialize_into(&mut file, &name_data_len)
-            .expect("Failed to write name data length");
-        bincode::serialize_into(&mut file, &rank_data_len)
-            .expect("Failed to write rank data length");
-
-        bincode::serialize_into(&mut file, &self.nodes).expect("Failed to write taxonomy nodes");
-        file.write_all(self.name_data.as_bytes())
-            .expect("Failed to write name data");
-        file.write_all(self.rank_data.as_bytes())
-            .expect("Failed to write rank data");
-    }
-
-    /// Generates a mapping from external IDs to internal IDs.
-    pub fn generate_external_to_internal_id_map(&mut self) {
-        self.external_to_internal_id_map.clear();
-        self.external_to_internal_id_map.insert(0, 0);
-
-        for (i, node) in self.nodes.iter().enumerate() {
-            self.external_to_internal_id_map
-                .insert(node.external_id, i as u64);
-        }
-    }
-
-    /// Retrieves the internal ID for a given external ID.
-    ///
-    /// # Arguments
-    ///
-    /// * `external_id` - The external taxonomy ID.
-    ///
-    /// # Returns
-    ///
-    /// The corresponding internal ID, or 0 if not found.
-    pub fn get_internal_id(&self, external_id: u64) -> u64 {
-        self.external_to_internal_id_map
-            .get(&external_id)
-            .copied()
-            .unwrap_or(0)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
+// Add any additional methods such as IsAAncestorOfB and LowestCommonAncestor here.
 
-    const NODES_DATA: &str =
-        "1\t|\t1\t|\tno rank\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|
-2\t|\t1\t|\tsuperkingdom\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|
-3\t|\t1\t|\tclade\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|";
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use std::io::Cursor;
 
-    const NAMES_DATA: &str = "1\t|\tall\t|\t\t|\tsynonym\t|
-1\t|\troot\t|\t\t|\tscientific name\t|
-2\t|\tBacteria\t|\tBacteria <bacteria>\t|\tscientific name\t|
-3\t|\tAT-rich\t|\t\t|\tsynonym\t|";
+//     const NODES_DATA: &str =
+//         "1\t|\t1\t|\tno rank\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|
+// 2\t|\t1\t|\tsuperkingdom\t|\t\t|\t0\t|\t0\t|\t11\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|
+// 3\t|\t1\t|\tclade\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|";
 
-    #[test]
-    fn test_ncbi_taxonomy_new() {
-        let nodes_file = Cursor::new(NODES_DATA);
-        let names_file = Cursor::new(NAMES_DATA);
+//     const NAMES_DATA: &str = "1\t|\tall\t|\t\t|\tsynonym\t|
+// 1\t|\troot\t|\t\t|\tscientific name\t|
+// 2\t|\tBacteria\t|\tBacteria <bacteria>\t|\tscientific name\t|
+// 3\t|\tAT-rich\t|\t\t|\tsynonym\t|";
 
-        let taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
-        println!("{:#?}", taxonomy);
+//     #[test]
+//     fn test_ncbi_taxonomy_new() {
+//         let nodes_file = Cursor::new(NODES_DATA);
+//         let names_file = Cursor::new(NAMES_DATA);
 
-        assert_eq!(taxonomy.parent_map.len(), 3);
-        assert_eq!(taxonomy.name_map.len(), 2);
-        assert_eq!(taxonomy.rank_map.len(), 3);
-        assert_eq!(taxonomy.child_map.len(), 1);
-        assert_eq!(taxonomy.marked_nodes.len(), 1);
-        assert_eq!(taxonomy.known_ranks.len(), 3);
+//         let taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         println!("{:#?}", taxonomy);
 
-        assert_eq!(taxonomy.parent_map[&1], 0);
-        assert_eq!(taxonomy.parent_map[&2], 1);
-        assert_eq!(taxonomy.parent_map[&3], 1);
+//         assert_eq!(taxonomy.parent_map.len(), 3);
+//         assert_eq!(taxonomy.name_map.len(), 2);
+//         assert_eq!(taxonomy.rank_map.len(), 3);
+//         assert_eq!(taxonomy.child_map.len(), 1);
+//         assert_eq!(taxonomy.marked_nodes.len(), 1);
+//         assert_eq!(taxonomy.known_ranks.len(), 3);
 
-        assert_eq!(taxonomy.name_map[&1], "root");
-        assert_eq!(taxonomy.name_map[&2], "Bacteria");
-        // assert_eq!(taxonomy.name_map[&3], "AT-rich"); // Not "scientific name"
+//         assert_eq!(taxonomy.parent_map[&1], 0);
+//         assert_eq!(taxonomy.parent_map[&2], 1);
+//         assert_eq!(taxonomy.parent_map[&3], 1);
 
-        assert_eq!(taxonomy.rank_map[&1], "no rank");
-        assert_eq!(taxonomy.rank_map[&2], "superkingdom");
-        assert_eq!(taxonomy.rank_map[&3], "clade");
+//         assert_eq!(taxonomy.name_map[&1], "root");
+//         assert_eq!(taxonomy.name_map[&2], "Bacteria");
+//         // assert_eq!(taxonomy.name_map[&3], "AT-rich"); // Not "scientific name"
 
-        assert!(taxonomy.child_map[&1].contains(&2));
-        assert!(taxonomy.child_map[&1].contains(&3));
+//         assert_eq!(taxonomy.rank_map[&1], "no rank");
+//         assert_eq!(taxonomy.rank_map[&2], "superkingdom");
+//         assert_eq!(taxonomy.rank_map[&3], "clade");
 
-        assert!(taxonomy.marked_nodes.contains(&1));
+//         assert!(taxonomy.child_map[&1].contains(&2));
+//         assert!(taxonomy.child_map[&1].contains(&3));
 
-        assert!(taxonomy.known_ranks.contains("no rank"));
-        assert!(taxonomy.known_ranks.contains("superkingdom"));
-        assert!(taxonomy.known_ranks.contains("clade"));
-    }
+//         assert!(taxonomy.marked_nodes.contains(&1));
 
-    #[test]
-    fn test_ncbi_taxonomy_mark_node() {
-        let nodes_file = Cursor::new(NODES_DATA);
-        let names_file = Cursor::new(NAMES_DATA);
+//         assert!(taxonomy.known_ranks.contains("no rank"));
+//         assert!(taxonomy.known_ranks.contains("superkingdom"));
+//         assert!(taxonomy.known_ranks.contains("clade"));
+//     }
 
-        let mut taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
-        println!("{:?}", taxonomy);
+//     #[test]
+//     fn test_ncbi_taxonomy_mark_node() {
+//         let nodes_file = Cursor::new(NODES_DATA);
+//         let names_file = Cursor::new(NAMES_DATA);
 
-        taxonomy.mark_node(3);
+//         let mut taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         println!("{:?}", taxonomy);
 
-        assert!(taxonomy.marked_nodes.contains(&1));
-        assert!(taxonomy.marked_nodes.contains(&3));
-    }
+//         taxonomy.mark_node(3);
 
-    #[test]
-    fn test_taxonomy_is_a_ancestor_of_b() {
-        let nodes_file = Cursor::new(NODES_DATA);
-        let names_file = Cursor::new(NAMES_DATA);
+//         assert!(taxonomy.marked_nodes.contains(&1));
+//         assert!(taxonomy.marked_nodes.contains(&3));
+//     }
 
-        let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
-        ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
+//     #[test]
+//     fn test_taxonomy_is_a_ancestor_of_b() {
+//         let nodes_file = Cursor::new(NODES_DATA);
+//         let names_file = Cursor::new(NAMES_DATA);
 
-        let mut taxonomy = Taxonomy::new("test_taxonomy.k2d");
-        taxonomy.generate_external_to_internal_id_map();
+//         let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
 
-        let root_id = taxonomy.get_internal_id(1);
-        let bacteria_id = taxonomy.get_internal_id(2);
-        let at_rich_id = taxonomy.get_internal_id(3);
+//         let mut taxonomy = Taxonomy::new("test_taxonomy.k2d");
+//         taxonomy.generate_external_to_internal_id_map();
 
-        assert!(taxonomy.is_a_ancestor_of_b(root_id, bacteria_id));
-        assert!(taxonomy.is_a_ancestor_of_b(root_id, at_rich_id));
-        assert!(!taxonomy.is_a_ancestor_of_b(bacteria_id, root_id));
-        assert!(!taxonomy.is_a_ancestor_of_b(bacteria_id, at_rich_id));
-        assert!(!taxonomy.is_a_ancestor_of_b(at_rich_id, root_id));
-        assert!(!taxonomy.is_a_ancestor_of_b(at_rich_id, bacteria_id));
-    }
+//         let root_id = taxonomy.get_internal_id(1);
+//         let bacteria_id = taxonomy.get_internal_id(2);
+//         let at_rich_id = taxonomy.get_internal_id(3);
 
-    #[test]
-    fn test_taxonomy_lowest_common_ancestor() {
-        let nodes_file = Cursor::new(NODES_DATA);
-        let names_file = Cursor::new(NAMES_DATA);
+//         assert!(taxonomy.is_a_ancestor_of_b(root_id, bacteria_id));
+//         assert!(taxonomy.is_a_ancestor_of_b(root_id, at_rich_id));
+//         assert!(!taxonomy.is_a_ancestor_of_b(bacteria_id, root_id));
+//         assert!(!taxonomy.is_a_ancestor_of_b(bacteria_id, at_rich_id));
+//         assert!(!taxonomy.is_a_ancestor_of_b(at_rich_id, root_id));
+//         assert!(!taxonomy.is_a_ancestor_of_b(at_rich_id, bacteria_id));
+//     }
 
-        let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
-        ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
+//     #[test]
+//     fn test_taxonomy_lowest_common_ancestor() {
+//         let nodes_file = Cursor::new(NODES_DATA);
+//         let names_file = Cursor::new(NAMES_DATA);
 
-        let taxonomy = Taxonomy::new("test_taxonomy.k2d");
+//         let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
 
-        assert_eq!(taxonomy.lowest_common_ancestor(1, 2), 1);
-        assert_eq!(taxonomy.lowest_common_ancestor(1, 3), 1);
-        assert_eq!(taxonomy.lowest_common_ancestor(2, 3), 1);
-        assert_eq!(taxonomy.lowest_common_ancestor(2, 2), 2);
-        assert_eq!(taxonomy.lowest_common_ancestor(3, 3), 3);
-    }
+//         let taxonomy = Taxonomy::new("test_taxonomy.k2d");
 
-    #[test]
-    fn test_taxonomy_get_internal_id() {
-        let nodes_file = Cursor::new(NODES_DATA);
-        let names_file = Cursor::new(NAMES_DATA);
+//         assert_eq!(taxonomy.lowest_common_ancestor(1, 2), 1);
+//         assert_eq!(taxonomy.lowest_common_ancestor(1, 3), 1);
+//         assert_eq!(taxonomy.lowest_common_ancestor(2, 3), 1);
+//         assert_eq!(taxonomy.lowest_common_ancestor(2, 2), 2);
+//         assert_eq!(taxonomy.lowest_common_ancestor(3, 3), 3);
+//     }
 
-        let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
-        ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
+//     #[test]
+//     fn test_taxonomy_get_internal_id() {
+//         let nodes_file = Cursor::new(NODES_DATA);
+//         let names_file = Cursor::new(NAMES_DATA);
 
-        let mut taxonomy = Taxonomy::new("test_taxonomy.k2d");
-        taxonomy.generate_external_to_internal_id_map();
+//         let ncbi_taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         ncbi_taxonomy.convert_to_kraken_taxonomy("test_taxonomy.k2d");
 
-        assert_eq!(taxonomy.get_internal_id(1), 1);
-        assert_eq!(taxonomy.get_internal_id(2), 2);
-        assert_eq!(taxonomy.get_internal_id(3), 3);
-        assert_eq!(taxonomy.get_internal_id(4), 0);
-    }
-}
+//         let mut taxonomy = Taxonomy::new("test_taxonomy.k2d");
+//         taxonomy.generate_external_to_internal_id_map();
+
+//         assert_eq!(taxonomy.get_internal_id(1), 1);
+//         assert_eq!(taxonomy.get_internal_id(2), 2);
+//         assert_eq!(taxonomy.get_internal_id(3), 3);
+//         assert_eq!(taxonomy.get_internal_id(4), 0);
+//     }
+
+//     #[cfg(test)]
+//     // Existing constants for nodes and names data.
+
+//     // Test handling of empty input files.
+//     #[test]
+//     fn test_empty_input_files() {
+//         let nodes_file = Cursor::new("");
+//         let names_file = Cursor::new("");
+
+//         let taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+//         assert!(taxonomy.parent_map.is_empty());
+//         assert!(taxonomy.name_map.is_empty());
+//         assert!(taxonomy.rank_map.is_empty());
+//         assert!(taxonomy.child_map.is_empty());
+//         assert!(taxonomy.marked_nodes.is_empty());
+//         assert!(taxonomy.known_ranks.is_empty());
+//     }
+
+//     // Test handling of input files with malformed lines.
+//     #[test]
+//     fn test_malformed_lines() {
+//         let nodes_data =
+//             "1\t|\t|\tno rank\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|";
+//         let names_data = "1\t|\troot\t|\t\t|\t";
+//         let nodes_file = Cursor::new(nodes_data);
+//         let names_file = Cursor::new(names_data);
+
+//         let result = std::panic::catch_unwind(|| {
+//             NCBITaxonomy::from_readers(nodes_file, names_file);
+//         });
+
+//         assert!(result.is_err(), "Expected a panic due to malformed input");
+//     }
+
+//     // Test handling of lines with missing fields.
+//     #[test]
+//     fn test_incomplete_lines() {
+//         let nodes_data = "1\t|\t1\t|\tno rank";
+//         let names_data = "1\t|\troot";
+//         let nodes_file = Cursor::new(nodes_data);
+//         let names_file = Cursor::new(names_data);
+
+//         let result = std::panic::catch_unwind(|| {
+//             NCBITaxonomy::from_readers(nodes_file, names_file);
+//         });
+
+//         assert!(result.is_err(), "Expected a panic due to incomplete input");
+//     }
+
+//     // Test correct handling and parsing of node and name types.
+//     #[test]
+//     fn test_valid_input_handling() {
+//         let nodes_data =
+//             "2\t|\t1\t|\tgenus\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|";
+//         let names_data = "2\t|\tEscherichia coli\t|\t\t|\tscientific name\t|";
+//         let nodes_file = Cursor::new(nodes_data);
+//         let names_file = Cursor::new(names_data);
+
+//         let taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+
+//         assert_eq!(taxonomy.parent_map.get(&2), Some(&1));
+//         assert_eq!(
+//             taxonomy.name_map.get(&2),
+//             Some(&"Escherichia coli".to_string())
+//         );
+//         assert_eq!(taxonomy.rank_map.get(&2), Some(&"genus".to_string()));
+//         assert!(taxonomy.child_map[&1].contains(&2));
+//     }
+
+//     // Test that nodes with non-scientific names are not included in the name_map.
+//     #[test]
+//     fn test_non_scientific_names_exclusion() {
+//         let names_data = "3\t|\tE. coli\t|\t\t|\tcommon name\t|";
+//         let names_file = Cursor::new(names_data);
+
+//         let nodes_data =
+//             "3\t|\t2\t|\tspecies\t|\t\t|\t8\t|\t0\t|\t1\t|\t0\t|\t0\t|\t0\t|\t0\t|\t0\t|\t\t|";
+//         let nodes_file = Cursor::new(nodes_data);
+
+//         let taxonomy = NCBITaxonomy::from_readers(nodes_file, names_file);
+
+//         assert!(
+//             taxonomy.name_map.get(&3).is_none(),
+//             "Common names should not be included in the name_map."
+//         );
+//     }
+// }

@@ -1,10 +1,11 @@
 # Directories
 /.plandex/
 /.vscode/
-/kraken2/
 /FreeAskInternet/
 /target/
 /firedbg/
+/kraken2/
+/build/
 
 # Files
 .DS_Store

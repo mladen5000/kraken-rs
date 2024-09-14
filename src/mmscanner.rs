@@ -4,22 +4,21 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
-use std::cmp::min;
-use std::usize;
+use std::collections::VecDeque;
 
-pub const DEFAULT_TOGGLE_MASK: u64 = 0xe37e28c4271b5a2d;
-pub const DEFAULT_SPACED_SEED_MASK: u64 = 0;
-pub const BITS_PER_CHAR_DNA: usize = 2;
-pub const BITS_PER_CHAR_PRO: usize = 4;
-pub const CURRENT_REVCOM_VERSION: i32 = 1;
+const DEFAULT_TOGGLE_MASK: u64 = 0xe37e28c4271b5a2d;
+const DEFAULT_SPACED_SEED_MASK: u64 = 0;
+const BITS_PER_CHAR_DNA: usize = 2;
+const BITS_PER_CHAR_PRO: usize = 4;
+const CURRENT_REVCOM_VERSION: i32 = 1;
 
 pub struct MinimizerData {
-    pub candidate: u64,
-    pub pos: isize,
+    candidate: u64,
+    pos: isize,
 }
 
-pub struct MinimizerScanner {
-    str_: Option<&'static str>,
+pub struct MinimizerScanner<'a> {
+    str_: Option<&'a str>, // pointer to sequence
     k_: isize,
     l_: isize,
     str_pos_: usize,
@@ -32,14 +31,14 @@ pub struct MinimizerScanner {
     lmer_mask_: u64,
     last_minimizer_: u64,
     loaded_ch_: isize,
-    queue_: Vec<MinimizerData>,
+    queue_: VecDeque<MinimizerData>,
     queue_pos_: isize,
     last_ambig_: u64,
     lookup_table_: [u8; 256],
     revcom_version_: i32,
 }
 
-impl MinimizerScanner {
+impl<'a> MinimizerScanner<'a> {
     pub fn new(
         k: isize,
         l: isize,
@@ -60,22 +59,22 @@ impl MinimizerScanner {
             toggle_mask_: toggle_mask,
             lmer_: 0,
             lmer_mask_: 0,
-            last_minimizer_: !0,
+            last_minimizer_: u64::MAX,
             loaded_ch_: 0,
-            queue_: Vec::new(),
+            queue_: VecDeque::new(),
             queue_pos_: 0,
             last_ambig_: 0,
-            lookup_table_: [0xff; 256],
+            lookup_table_: [u8::MAX; 256],
             revcom_version_: revcom_version,
         };
 
-        if l > ((std::mem::size_of::<u64>() * 8 - 1) as isize
-            / if dna_sequence {
-                BITS_PER_CHAR_DNA as isize
-            } else {
-                BITS_PER_CHAR_PRO as isize
-            }) as isize
-        {
+        let bits_per_char = if scanner.dna_ {
+            BITS_PER_CHAR_DNA
+        } else {
+            BITS_PER_CHAR_PRO
+        };
+
+        if l > ((std::mem::size_of::<u64>() * 8 - 1) / bits_per_char) as isize {
             panic!(
                 "l exceeds size limits for minimizer {} scanner",
                 if dna_sequence {
@@ -86,25 +85,10 @@ impl MinimizerScanner {
             );
         }
 
-        scanner.lmer_mask_ = 1;
-        scanner.lmer_mask_ <<= ((l as usize)
-            * if dna_sequence {
-                BITS_PER_CHAR_DNA
-            } else {
-                BITS_PER_CHAR_PRO
-            }) as u64;
-        scanner.lmer_mask_ -= 1;
+        scanner.lmer_mask_ = (1 << (l * bits_per_char as isize)) - 1;
         scanner.toggle_mask_ &= scanner.lmer_mask_;
 
-        if scanner.finish_ == usize::MAX {
-            scanner.finish_ = scanner.str_.map_or(0, |s| s.len());
-        }
-
-        if (scanner.finish_ - scanner.start_) + 1 < l as usize {
-            scanner.str_pos_ = scanner.finish_;
-        }
-
-        if dna_sequence {
+        if scanner.dna_ {
             scanner.set_lookup_table_character('A', 0x00);
             scanner.set_lookup_table_character('C', 0x01);
             scanner.set_lookup_table_character('G', 0x02);
@@ -138,46 +122,40 @@ impl MinimizerScanner {
         scanner
     }
 
-    fn set_lookup_table_character(&mut self, ch: char, val: u8) {
-        self.lookup_table_[ch as usize] = val;
-        self.lookup_table_[ch.to_ascii_lowercase() as usize] = val;
-    }
-
-    pub fn load_sequence(&mut self, seq: &str, start: usize, finish: usize) {
+    pub fn load_sequence(&mut self, seq: &'a str, start: usize, finish: usize) {
         self.str_ = Some(seq);
         self.start_ = start;
         self.finish_ = finish;
-        self.str_pos_ = self.start_;
-
-        if self.finish_ > self.str_.map_or(0, |s| s.len()) {
-            self.finish_ = self.str_.map_or(0, |s| s.len());
+        self.str_pos_ = start;
+        if self.finish_ > seq.len() {
+            self.finish_ = seq.len();
         }
-
         if (self.finish_ - self.start_) + 1 < self.l_ as usize {
             self.str_pos_ = self.finish_;
         }
-
         self.queue_.clear();
         self.queue_pos_ = 0;
         self.loaded_ch_ = 0;
-        self.last_minimizer_ = !0;
+        self.last_minimizer_ = u64::MAX;
         self.last_ambig_ = 0;
     }
 
-    pub fn next_minimizer(&mut self) -> Option<&u64> {
+    pub fn next_minimizer(&mut self) -> Option<u64> {
         if self.str_pos_ >= self.finish_ {
             return None;
         }
 
-        let mut changed_minimizer = false;
         let bits_per_char = if self.dna_ {
             BITS_PER_CHAR_DNA
         } else {
             BITS_PER_CHAR_PRO
         };
-        let ambig_code = (1u64 << bits_per_char) - 1;
 
-        while !changed_minimizer {
+        let ambig_code = (1u32 << bits_per_char) - 1;
+
+        loop {
+            let mut changed_minimizer = false;
+
             if self.loaded_ch_ == self.l_ {
                 self.loaded_ch_ -= 1;
             }
@@ -187,16 +165,16 @@ impl MinimizerScanner {
                 self.lmer_ <<= bits_per_char;
                 self.last_ambig_ <<= bits_per_char;
 
-                let lookup_code = self.lookup_table_
-                    [self.str_.as_ref().unwrap().as_bytes()[self.str_pos_] as usize];
+                let lookup_code =
+                    self.lookup_table_[self.str_.unwrap().as_bytes()[self.str_pos_] as usize];
                 self.str_pos_ += 1;
 
-                if lookup_code == 0xff {
+                if lookup_code == u8::MAX {
                     self.queue_.clear();
                     self.queue_pos_ = 0;
                     self.lmer_ = 0;
                     self.loaded_ch_ = 0;
-                    self.last_ambig_ |= ambig_code;
+                    self.last_ambig_ |= ambig_code as u64;
                 } else {
                     self.lmer_ |= lookup_code as u64;
                 }
@@ -205,7 +183,7 @@ impl MinimizerScanner {
                 self.last_ambig_ &= self.lmer_mask_;
 
                 if (self.str_pos_ - self.start_) >= self.k_ as usize && self.loaded_ch_ < self.l_ {
-                    return Some(&self.last_minimizer_);
+                    return Some(self.last_minimizer_);
                 }
             }
 
@@ -213,26 +191,26 @@ impl MinimizerScanner {
                 return None;
             }
 
-            let canonical_lmer = if self.dna_ {
+            let mut canonical_lmer = if self.dna_ {
                 self.canonical_representation(self.lmer_, self.l_ as u8)
             } else {
                 self.lmer_
             };
 
-            let candidate_lmer = if self.spaced_seed_mask_ != 0 {
-                canonical_lmer & self.spaced_seed_mask_
-            } else {
-                canonical_lmer ^ self.toggle_mask_
-            };
+            if self.spaced_seed_mask_ != 0 {
+                canonical_lmer &= self.spaced_seed_mask_;
+            }
+
+            let candidate_lmer = canonical_lmer ^ self.toggle_mask_;
 
             if self.k_ == self.l_ {
                 self.last_minimizer_ = candidate_lmer ^ self.toggle_mask_;
-                return Some(&self.last_minimizer_);
+                return Some(self.last_minimizer_);
             }
 
-            while !self.queue_.is_empty() && self.queue_.last().unwrap().candidate > candidate_lmer
+            while !self.queue_.is_empty() && self.queue_.back().unwrap().candidate > candidate_lmer
             {
-                self.queue_.pop();
+                self.queue_.pop_back();
             }
 
             let data = MinimizerData {
@@ -244,12 +222,10 @@ impl MinimizerScanner {
                 changed_minimizer = true;
             }
 
-            self.queue_.push(data);
+            self.queue_.push_back(data);
 
-            if !self.queue_.is_empty()
-                && self.queue_.first().unwrap().pos < self.queue_pos_ - self.k_ + self.l_
-            {
-                self.queue_.remove(0);
+            if self.queue_.front().unwrap().pos < self.queue_pos_ - self.k_ + self.l_ {
+                self.queue_.pop_front();
                 changed_minimizer = true;
             }
 
@@ -262,11 +238,44 @@ impl MinimizerScanner {
             if self.str_pos_ >= self.k_ as usize {
                 break;
             }
+
+            if changed_minimizer {
+                break;
+            }
         }
 
         assert!(!self.queue_.is_empty());
-        self.last_minimizer_ = self.queue_.first().unwrap().candidate ^ self.toggle_mask_;
-        Some(&self.last_minimizer_)
+        self.last_minimizer_ = self.queue_.front().unwrap().candidate ^ self.toggle_mask_;
+        Some(self.last_minimizer_)
+    }
+
+    fn set_lookup_table_character(&mut self, c: char, val: u8) {
+        self.lookup_table_[c as usize] = val;
+        self.lookup_table_[(c as u8).to_ascii_lowercase() as usize] = val;
+    }
+
+    fn reverse_complement(&self, kmer: u64, n: u8) -> u64 {
+        let mut kmer = kmer;
+        kmer = ((kmer & 0xCCCCCCCCCCCCCCCC) >> 2) | ((kmer & 0x3333333333333333) << 2);
+        kmer = ((kmer & 0xF0F0F0F0F0F0F0F0) >> 4) | ((kmer & 0x0F0F0F0F0F0F0F0F) << 4);
+        kmer = ((kmer & 0xFF00FF00FF00FF00) >> 8) | ((kmer & 0x00FF00FF00FF00FF) << 8);
+        kmer = ((kmer & 0xFFFF0000FFFF0000) >> 16) | ((kmer & 0x0000FFFF0000FFFF) << 16);
+        kmer = (kmer >> 32) | (kmer << 32);
+
+        if self.revcom_version_ == 0 {
+            (!kmer) & ((1u64 << (n * 2)) - 1)
+        } else {
+            ((!kmer) >> (64 - n * 2)) & ((1u64 << (n * 2)) - 1)
+        }
+    }
+
+    fn canonical_representation(&self, kmer: u64, n: u8) -> u64 {
+        let revcom = self.reverse_complement(kmer, n);
+        if kmer < revcom {
+            kmer
+        } else {
+            revcom
+        }
     }
 
     pub fn last_minimizer(&self) -> u64 {
@@ -287,28 +296,5 @@ impl MinimizerScanner {
 
     pub fn is_ambiguous(&self) -> bool {
         self.queue_pos_ < self.k_ - self.l_ || self.last_ambig_ != 0
-    }
-
-    fn reverse_complement(&self, kmer: u64, n: u8) -> u64 {
-        let mut kmer = kmer;
-        kmer = ((kmer & 0xCCCCCCCCCCCCCCCCu64) >> 2) | ((kmer & 0x3333333333333333u64) << 2);
-        kmer = ((kmer & 0xF0F0F0F0F0F0F0F0u64) >> 4) | ((kmer & 0x0F0F0F0F0F0F0F0Fu64) << 4);
-        kmer = ((kmer & 0xFF00FF00FF00FF00u64) >> 8) | ((kmer & 0x00FF00FF00FF00FFu64) << 8);
-        kmer = ((kmer & 0xFFFF0000FFFF0000u64) >> 16) | ((kmer & 0x0000FFFF0000FFFFu64) << 16);
-        kmer = (kmer >> 32) | (kmer << 32);
-
-        let n_usize = n as usize; // Convert n to usize
-
-        if self.revcom_version_ == 0 {
-            (!kmer) & ((1u64 << (n_usize * 2)) - 1) // Use n_usize instead of n
-        } else {
-            ((!kmer) >> (std::mem::size_of::<u64>() * 8 - n_usize * 2))
-                & ((1u64 << (n_usize * 2)) - 1) // Use n_usize instead of n
-        }
-    }
-
-    fn canonical_representation(&self, kmer: u64, n: u8) -> u64 {
-        let revcom = self.reverse_complement(kmer, n);
-        min(kmer, revcom)
     }
 }
