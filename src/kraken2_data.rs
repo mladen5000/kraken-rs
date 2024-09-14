@@ -1,6 +1,11 @@
-use crate::hyperloglogplus::HyperLogLogPlusMinus;
-use crate::readcounts::ReadCounts;
+/*
+ * Copyright 2013-2023, Derrick Wood
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
+
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub struct IndexOptions {
     pub k: usize,
@@ -14,30 +19,16 @@ pub struct IndexOptions {
     pub db_type: i32,        // To allow for future use of other data structures
 }
 
-impl IndexOptions {
-    pub fn new() -> Self {
-        IndexOptions {
-            k: 0,
-            l: 0,
-            spaced_seed_mask: 0,
-            toggle_mask: 0,
-            dna_db: false,
-            minimum_acceptable_hash_value: 0,
-            revcom_version: 0,
-            db_version: 0,
-            db_type: 0,
-        }
-    }
-}
-
 pub type TaxId = u64;
-pub const TAXID_MAX: TaxId = !0;
+pub const TAXID_MAX: TaxId = u64::MAX;
 
 pub type TaxonCounts = HashMap<TaxId, u64>;
 
+// Conditional compilation based on the `exact_counting` feature
 #[cfg(feature = "exact_counting")]
 pub type ReadCounter = ReadCounts<HashSet<u64>>;
+
 #[cfg(not(feature = "exact_counting"))]
-pub type ReadCounter = ReadCounts<HyperLogLogPlusMinus>;
+pub type ReadCounter = ReadCounts<HyperLogLogPlusMinus<u64>>;
 
 pub type TaxonCounters = HashMap<TaxId, ReadCounter>;

@@ -1,54 +1,105 @@
 use flate2::read::GzDecoder;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, BufRead, Read};
 use std::path::Path;
 
-pub struct GzInputStream {
-    /// List of files to read from
+pub struct GzMultiReader {
     files: Vec<String>,
-    /// Current file being read from
-    current_file: Option<Box<dyn Read>>,
+    current_index: usize,
+    current_reader: Option<GzDecoder<File>>,
+    buffer: Vec<u8>,
+    pos: usize,
+    cap: usize,
 }
 
-impl GzInputStream {
-    /// Create a new GzInputStream from a single file
-    pub fn new_single(filename: &str) -> GzInputStream {
-        let file = File::open(filename).unwrap();
-        let decoder = GzDecoder::new(file);
-        let reader = Box::new(BufReader::new(decoder));
-
-        GzInputStream {
-            files: vec![filename.to_string()],
-            current_file: Some(reader),
-        }
-    }
-
-    /// Create a new GzInputStream from multiple files
-    pub fn new_multiple(filenames: Vec<String>) -> GzInputStream {
-        let file = File::open(&filenames[0]).unwrap();
-        let decoder = GzDecoder::new(file);
-        let reader = Box::new(BufReader::new(decoder));
-
-        GzInputStream {
+impl GzMultiReader {
+    pub fn new(filenames: Vec<String>) -> io::Result<Self> {
+        let mut reader = GzMultiReader {
             files: filenames,
-            current_file: Some(reader),
-        }
+            current_index: 0,
+            current_reader: None,
+            buffer: vec![0; 8 * 1024], // 8KB buffer, similar to DEFAULT_BUFSIZ
+            pos: 0,
+            cap: 0,
+        };
+        reader.open_next_file()?;
+        Ok(reader)
     }
 
-    pub fn next(&mut self) -> Option<u8> {
-        match self.current_file.as_mut().unwrap().bytes().next() {
-            Some(Ok(byte)) => Some(byte),
-            _ => {
-                self.files.remove(0);
-                if !self.files.is_empty() {
-                    let file = File::open(&self.files[0]).unwrap();
-                    let decoder = GzDecoder::new(file);
-                    self.current_file = Some(Box::new(BufReader::new(decoder)));
-                    self.next()
+    pub fn from_file<P: AsRef<Path>>(filename: P) -> io::Result<Self> {
+        Self::new(vec![filename.as_ref().to_string_lossy().into_owned()])
+    }
+
+    fn open_next_file(&mut self) -> io::Result<()> {
+        if self.current_index >= self.files.len() {
+            self.current_reader = None;
+            return Ok(());
+        }
+
+        let file = File::open(&self.files[self.current_index])?;
+        self.current_reader = Some(GzDecoder::new(file));
+        self.current_index += 1;
+        self.pos = 0;
+        self.cap = 0;
+        Ok(())
+    }
+
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos >= self.cap {
+            self.cap = match &mut self.current_reader {
+                Some(reader) => reader.read(&mut self.buffer)?,
+                None => return Ok(&[]),
+            };
+            self.pos = 0;
+        }
+
+        Ok(&self.buffer[self.pos..self.cap])
+    }
+}
+
+impl Read for GzMultiReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut total_read = 0;
+
+        while total_read < buf.len() {
+            let available = self.fill_buf()?;
+            if available.is_empty() {
+                if self.open_next_file().is_ok() {
+                    continue;
                 } else {
-                    None
+                    break;
                 }
             }
+
+            let to_read = std::cmp::min(available.len(), buf.len() - total_read);
+            buf[total_read..total_read + to_read].copy_from_slice(&available[..to_read]);
+            self.pos += to_read;
+            total_read += to_read;
         }
+
+        Ok(total_read)
+    }
+}
+
+impl BufRead for GzMultiReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos >= self.cap {
+            self.cap = match &mut self.current_reader {
+                Some(reader) => reader.read(&mut self.buffer)?,
+                None => 0,
+            };
+            self.pos = 0;
+
+            if self.cap == 0 && self.current_index < self.files.len() {
+                self.open_next_file()?;
+                return self.fill_buf();
+            }
+        }
+
+        Ok(&self.buffer[self.pos..self.cap])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.pos = std::cmp::min(self.pos + amt, self.cap);
     }
 }

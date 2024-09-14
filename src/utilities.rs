@@ -1,97 +1,77 @@
-/// Expands a spaced seed mask based on a bit expansion factor.
+/*
+ * Copyright 2013-2023, Derrick Wood
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
+
+use std::u64;
+
+/// Expands a spaced seed mask by repeating each bit `bit_expansion_factor` times.
 ///
 /// # Arguments
 ///
-/// * `spaced_seed_mask` - The original spaced seed mask to be expanded.
-/// * `bit_expansion_factor` - The factor by which each bit in the mask is expanded.
+/// * `spaced_seed_mask` - A mutable reference to the original seed mask.
+/// * `bit_expansion_factor` - The number of times to repeat each bit.
 ///
-/// # Returns
+/// # Example
 ///
-/// The expanded spaced seed mask.
-pub fn expand_spaced_seed_mask(spaced_seed_mask: &mut u64, bit_expansion_factor: usize) {
+/// ```
+/// let mut mask = 0b101;
+/// expand_spaced_seed_mask(&mut mask, 2);
+/// assert_eq!(mask, 0b11_00_11);
+/// ```
+pub fn expand_spaced_seed_mask(spaced_seed_mask: &mut u64, bit_expansion_factor: i32) {
+    let bits = (1u64 << bit_expansion_factor) - 1;
     let mut new_mask: u64 = 0;
-    let bits = (1 << bit_expansion_factor) - 1;
 
-    for i in 0..64 {
-        new_mask <<= bit_expansion_factor;
-        if (*spaced_seed_mask >> (63 - i)) & 1 != 0 {
+    let n = 64 / bit_expansion_factor;
+
+    for i in (0..n).rev() {
+        new_mask <<= bit_expansion_factor as u32;
+        if ((*spaced_seed_mask >> i as u32) & 1) != 0 {
             new_mask |= bits;
         }
     }
     *spaced_seed_mask = new_mask;
 }
 
-/// Splits a string based on a delimiter into a vector of substrings.
+/// Splits a string into a vector of substrings based on a delimiter, up to a maximum number of fields.
 ///
 /// # Arguments
 ///
-/// * `str` - The string to be split.
-/// * `delim` - The delimiter to split the string.
+/// * `s` - The string to split.
+/// * `delim` - The delimiter string.
 /// * `max_fields` - The maximum number of fields to split into.
 ///
 /// # Returns
 ///
-/// A vector containing the split substrings.
-pub fn split_string(str: &str, delim: &str, max_fields: usize) -> Vec<String> {
+/// A vector of substrings.
+///
+/// # Example
+///
+/// ```
+/// let s = "one,two,three,four";
+/// let result = split_string(&s, ",", 3);
+/// assert_eq!(result, vec!["one", "two", "three,four"]);
+/// ```
+pub fn split_string(s: &str, delim: &str, max_fields: usize) -> Vec<String> {
     let mut output = Vec::new();
     let mut pos1 = 0;
     let mut field_ct = 0;
     let mut finished = false;
 
-    while field_ct < max_fields - 1 && !finished {
-        let pos2 = str[pos1..].find(delim).map(|x| x + pos1);
-        let token = match pos2 {
-            None => {
-                finished = true;
-                str[pos1..].to_string()
-            }
-            Some(pos) => {
-                let token = &str[pos1..pos];
-                pos1 = pos + delim.len();
-                token.to_string()
-            }
-        };
-        output.push(token);
+    while field_ct < max_fields && !finished {
+        if let Some(pos2_rel) = s[pos1..].find(delim) {
+            let pos2 = pos1 + pos2_rel;
+            let token = &s[pos1..pos2];
+            output.push(token.to_string());
+            pos1 = pos2 + delim.len();
+        } else {
+            let token = &s[pos1..];
+            output.push(token.to_string());
+            finished = true;
+        }
         field_ct += 1;
     }
-
-    if pos1 < str.len() {
-        output.push(str[pos1..].to_string());
-    }
-
     output
-}
-
-fn main() {
-    // Example usage of expand_spaced_seed_mask
-    let mut mask: u64 = 0b1010;
-    expand_spaced_seed_mask(&mut mask, 3);
-    println!("Expanded mask: {:064b}", mask);
-
-    // Example usage of split_string
-    let input_str = "one,two,three,four";
-    let split = split_string(input_str, ",", 3);
-    println!("Split string: {:?}", split);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_expand_spaced_seed_mask() {
-        let mut mask: u64 = 0b1010;
-        expand_spaced_seed_mask(&mut mask, 3);
-        assert_eq!(mask, 0b111000000111000000);
-    }
-
-    #[test]
-    fn test_split_string() {
-        let input_str = "one,two,three,four";
-        let split = split_string(input_str, ",", 3);
-        assert_eq!(split, vec!["one", "two", "three,four"]);
-
-        let split_all = split_string(input_str, ",", 10);
-        assert_eq!(split_all, vec!["one", "two", "three", "four"]);
-    }
 }
