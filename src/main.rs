@@ -9,7 +9,7 @@ pub mod reports;
 pub mod threadpool;
 
 // Build DB
-// pub mod build_db;
+pub mod build_db;
 pub mod compact_hash;
 pub mod kraken2_headers;
 pub mod mmscanner;

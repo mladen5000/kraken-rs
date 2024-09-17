@@ -8,6 +8,12 @@
 pub mod omp_hack {
     pub struct OmpLock;
 
+    impl Default for OmpLock {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl OmpLock {
         pub fn new() -> Self {
             OmpLock

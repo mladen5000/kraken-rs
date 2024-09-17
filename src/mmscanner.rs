@@ -260,7 +260,7 @@ impl<'a> MinimizerScanner<'a> {
         kmer = ((kmer & 0xF0F0F0F0F0F0F0F0) >> 4) | ((kmer & 0x0F0F0F0F0F0F0F0F) << 4);
         kmer = ((kmer & 0xFF00FF00FF00FF00) >> 8) | ((kmer & 0x00FF00FF00FF00FF) << 8);
         kmer = ((kmer & 0xFFFF0000FFFF0000) >> 16) | ((kmer & 0x0000FFFF0000FFFF) << 16);
-        kmer = (kmer >> 32) | (kmer << 32);
+        kmer = kmer.rotate_left(32);
 
         if self.revcom_version_ == 0 {
             (!kmer) & ((1u64 << (n * 2)) - 1)

@@ -1,3 +1,4 @@
+use crate::seqreader::Sequence;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
@@ -19,13 +20,6 @@ const ASCII2DNA: [u8; 256] = {
     arr[b't' as usize] = 3;
     arr
 };
-
-/// Represents a DNA sequence with its header.
-#[derive(Default)]
-struct Sequence {
-    header: String,
-    seq: String,
-}
 
 /// Represents an interval of perfect matches in the sequence.
 struct PerfectInterval {
@@ -143,7 +137,7 @@ fn save_masked_regions(sd: &mut SDust, window_start: usize) {
 
 /// Finds and records perfect k-mer intervals in the sequence for masking.
 fn find_perfect(sd: &mut SDust, window_start: usize, threshold: usize) {
-    let mut cv = sd.cv.clone();
+    let mut cv = sd.cv;
     let mut max_left = 0;
     let mut max_right = 0;
     let mut new_left = 0;

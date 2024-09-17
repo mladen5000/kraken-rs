@@ -183,7 +183,7 @@ impl NCBITaxonomy {
                 .name_map
                 .get(&external_node_id)
                 .cloned()
-                .unwrap_or_else(|| String::new());
+                .unwrap_or_else(String::new);
             name_data.push_str(&name);
             name_data.push('\0');
         }
@@ -220,6 +220,18 @@ impl Taxonomy {
         };
         taxo.init(filename, memory_mapping)?;
         Ok(taxo)
+    }
+    pub fn get_node(&self, id: TaxId) -> Option<&TaxonomyNode> {
+        self.nodes.get(id as usize)
+    }
+    pub fn get_name(&self, offset: usize) -> Option<&str> {
+        self.name_data
+            .get(offset..)
+            .and_then(|s| std::str::from_utf8(s).ok())
+            .and_then(|s| s.split('\0').next())
+    }
+    pub fn get_parent(&self, id: TaxId) -> Option<TaxId> {
+        self.nodes.get(id as usize).map(|node| node.parent_id)
     }
 
     fn init(&mut self, filename: &str, memory_mapping: bool) -> io::Result<()> {

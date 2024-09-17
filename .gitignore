@@ -5,6 +5,9 @@
 /target/
 /firedbg/
 /build/
+/.git/
+/.mypy_cache/
+/blah/
 
 # Files
 .DS_Store
@@ -13,3 +16,4 @@ Cargo.lock
 *.txt
 *.sh
 .gitignore
+test_taxonomy.k2d

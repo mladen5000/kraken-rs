@@ -38,7 +38,7 @@ fn main() {
         let accnum = fields[1].to_string();
         target_lists
             .entry(accnum)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(seqid);
     }
 
@@ -57,7 +57,7 @@ fn main() {
         }
 
         let accmap_path = Path::new(accmap_filename);
-        let accmap_file = File::open(&accmap_path).unwrap_or_else(|_| {
+        let accmap_file = File::open(accmap_path).unwrap_or_else(|_| {
             eprintln!("Error opening accmap file: {}", accmap_filename);
             process::exit(1);
         });

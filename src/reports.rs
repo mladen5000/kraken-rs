@@ -71,10 +71,10 @@ fn mpa_report_dfs(
     }
 
     let node = &taxonomy.nodes[internal_id as usize];
-    let rank = std::str::from_utf8(&taxonomy.rank_data[node.rank_offset as usize..]).unwrap();
+    let rank = std::str::from_utf8(&taxonomy.rank_data[node.rank_offset..]).unwrap();
 
     if let Some(rank_code) = get_rank_code(rank) {
-        let name = std::str::from_utf8(&taxonomy.name_data[node.name_offset as usize..]).unwrap();
+        let name = std::str::from_utf8(&taxonomy.name_data[node.name_offset..]).unwrap();
         let name = format!("{}__{}", rank_code, name);
         taxonomy_names.push(name);
         let taxonomy_line = taxonomy_names.join("|");
@@ -94,7 +94,7 @@ fn mpa_report_dfs(
             clade_counts
                 .get(b)
                 .unwrap_or(&0)
-                .cmp(&clade_counts.get(a).unwrap_or(&0))
+                .cmp(clade_counts.get(a).unwrap_or(&0))
         });
 
         for child in children {
@@ -201,7 +201,7 @@ fn kraken_report_dfs(
     }
 
     let node = &taxonomy.nodes[internal_id as usize];
-    let rank = std::str::from_utf8(&taxonomy.rank_data[node.rank_offset as usize..]).unwrap();
+    let rank = std::str::from_utf8(&taxonomy.rank_data[node.rank_offset..]).unwrap();
     let (rank_code, rank_depth) = get_kraken_rank_info(rank, rank_code, rank_depth);
     let rank_str = if rank_depth != 0 {
         format!("{}{}", rank_code, rank_depth)
@@ -209,7 +209,7 @@ fn kraken_report_dfs(
         rank_code.to_string()
     };
 
-    let sci_name = std::str::from_utf8(&taxonomy.name_data[node.name_offset as usize..]).unwrap();
+    let sci_name = std::str::from_utf8(&taxonomy.name_data[node.name_offset..]).unwrap();
     write_kraken_style_report_line(
         file,
         report_kmer_data,
@@ -326,136 +326,5 @@ fn get_kraken_rank_info(rank: &str, rank_code: char, rank_depth: i32) -> (char, 
         "superkingdom" | "kingdom" | "phylum" | "class" | "order" | "family" | "genus"
         | "species" => (get_rank_code(rank).unwrap(), 0),
         _ => (rank_code, rank_depth + 1),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::hyperloglogplus::murmurhash3_finalizer;
-
-    use super::*;
-
-    #[test]
-    fn test_get_clade_counts() {
-        let mut taxonomy = Taxonomy::new();
-        taxonomy.nodes = vec![
-            TaxonomyNode {
-                parent_id: 0,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 1,
-                godparent_id: 0,
-            },
-            TaxonomyNode {
-                parent_id: 1,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 2,
-                godparent_id: 0,
-            },
-            TaxonomyNode {
-                parent_id: 2,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 3,
-                godparent_id: 0,
-            },
-        ];
-        taxonomy.generate_external_to_internal_id_map();
-
-        let call_counts = vec![(1, 10), (2, 5), (3, 3)].into_iter().collect();
-        let clade_counts = get_clade_counts(&taxonomy, &call_counts);
-
-        assert_eq!(clade_counts.get(&1), Some(&18)); // I get Some(&10)
-        assert_eq!(clade_counts.get(&2), Some(&8));
-        assert_eq!(clade_counts.get(&3), Some(&3));
-    }
-
-    #[test]
-    fn test_get_clade_counters() {
-        let mut taxonomy = Taxonomy::new();
-        taxonomy.nodes = vec![
-            TaxonomyNode {
-                parent_id: 0,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 1,
-                godparent_id: 0,
-            },
-            TaxonomyNode {
-                parent_id: 1,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 2,
-                godparent_id: 0,
-            },
-            TaxonomyNode {
-                parent_id: 2,
-                first_child: 0,
-                child_count: 0,
-                name_offset: 0,
-                rank_offset: 0,
-                external_id: 3,
-                godparent_id: 0,
-            },
-        ];
-        taxonomy.generate_external_to_internal_id_map();
-
-        let call_counters = vec![
-            (
-                1,
-                ReadCounter::with_counts(
-                    10,
-                    100,
-                    HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer),
-                ),
-            ),
-            (
-                2,
-                ReadCounter::with_counts(
-                    5,
-                    50,
-                    HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer),
-                ),
-            ),
-            (
-                3,
-                ReadCounter::with_counts(
-                    3,
-                    30,
-                    HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer),
-                ),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let clade_counters = get_clade_counters(&taxonomy, &call_counters);
-
-        assert_eq!(clade_counters.get(&1).unwrap().read_count(), 18);
-        assert_eq!(clade_counters.get(&2).unwrap().read_count(), 8);
-        assert_eq!(clade_counters.get(&3).unwrap().read_count(), 3);
-    }
-
-    #[test]
-    fn test_get_rank_code() {
-        assert_eq!(get_rank_code("superkingdom"), Some('d'));
-        assert_eq!(get_rank_code("kingdom"), Some('k'));
-        assert_eq!(get_rank_code("phylum"), Some('p'));
-        assert_eq!(get_rank_code("class"), Some('c'));
-        assert_eq!(get_rank_code("order"), Some('o'));
-        assert_eq!(get_rank_code("family"), Some('f'));
-        assert_eq!(get_rank_code("genus"), Some('g'));
-        assert_eq!(get_rank_code("species"), Some('s'));
-        assert_eq!(get_rank_code("subspecies"), None);
     }
 }

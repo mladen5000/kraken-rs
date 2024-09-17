@@ -10,8 +10,12 @@ use serde::Serialize;
 use crate::readcounts::HyperLogLogPlusMinus;
 use crate::readcounts::ReadCounts;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io;
+use std::io::Read;
+use std::path::Path;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct IndexOptions {
     pub k: usize,
     pub l: usize,
@@ -24,6 +28,14 @@ pub struct IndexOptions {
     pub db_type: u32,        // To allow for future use of other data structures
 }
 
+impl IndexOptions {
+    pub fn load(filename: &Path) -> io::Result<Self> {
+        let mut file = File::open(filename)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        bincode::deserialize(&buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
 pub type TaxId = u64;
 pub const TAXID_MAX: TaxId = u64::MAX;
 

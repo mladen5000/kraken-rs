@@ -15,7 +15,7 @@ impl HyperLogLogPlusMinus {
         HyperLogLogPlusMinus { count: 0 }
     }
 
-    pub fn insert(&mut self, kmer: u64) {
+    pub fn insert(&mut self, _kmer: u64) {
         // Simplified implementation
         self.count += 1;
     }
@@ -73,7 +73,7 @@ impl KmerContainer for HyperLogLogPlusMinus {
 }
 
 // Updated ReadCounts struct
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ReadCounts<T>
 where
     T: KmerContainer,
@@ -180,5 +180,11 @@ where
         let mut result = self.clone();
         result += other;
         result
+    }
+}
+
+impl Default for ReadCounts<HyperLogLogPlusMinus> {
+    fn default() -> Self {
+        ReadCounts::new()
     }
 }

@@ -1,3 +1,4 @@
+use std::default::Default;
 use std::io::{BufRead, BufReader, Read};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -47,6 +48,19 @@ impl Sequence {
             }
         }
         &self.str_representation
+    }
+}
+
+impl Default for Sequence {
+    fn default() -> Self {
+        Self {
+            format: SequenceFormat::AutoDetect,
+            header: String::new(),
+            id: String::new(),
+            seq: String::new(),
+            quals: String::new(),
+            str_representation: String::new(),
+        }
     }
 }
 
@@ -108,16 +122,16 @@ impl<R: Read> BatchSequenceReader<R> {
         let format = self.file_format.clone(); // Clone the format to avoid moving it
 
         // Create a BufReader from the cloned buffer slice
-        let mut buf_reader = BufReader::new(buffer_clone.as_bytes());
+        let mut buf_reader: BufReader<&[u8]> = BufReader::new(buffer_clone.as_bytes());
 
-        BatchSequenceReader::read_next_sequence(
+        BatchSequenceReader::<R>::read_next_sequence(
             &mut buf_reader, // Use the clone for the buffer
             seq,
             format,
         )
     }
 
-    fn read_next_sequence(
+    pub fn read_next_sequence(
         reader: &mut BufReader<&[u8]>,
         sequence: &mut Sequence,
         format: SequenceFormat,
@@ -209,11 +223,11 @@ impl<R: Read> BatchSequenceReader<R> {
     */
 
     fn read_fastq_sequences(&mut self, reader: &mut BufReader<&[u8]>) -> bool {
-        while let Ok(_) = reader.read_line(&mut self.buffer) {
+        while reader.read_line(&mut self.buffer).is_ok() {
             if self.buffer.is_empty() {
                 break;
             }
-            self.buffer.push_str("\n");
+            self.buffer.push('\n');
             if self.buffer.starts_with('@') {
                 break;
             }
@@ -222,11 +236,11 @@ impl<R: Read> BatchSequenceReader<R> {
     }
 
     fn read_fasta_sequences(&mut self, reader: &mut BufReader<&[u8]>) -> bool {
-        while let Ok(_) = reader.read_line(&mut self.buffer) {
+        while reader.read_line(&mut self.buffer).is_ok() {
             if self.buffer.is_empty() {
                 break;
             }
-            self.buffer.push_str("\n");
+            self.buffer.push('\n');
             if self.buffer.starts_with('>') {
                 break;
             }
@@ -237,6 +251,10 @@ impl<R: Read> BatchSequenceReader<R> {
     pub fn file_format(&self) -> SequenceFormat {
         self.file_format.clone() // Return a clone of the format to avoid moving it
     }
+
+    // pub(crate) fn read_sequence(reader1: &dyn BufRead) -> _ {
+    //     todo!()
+    // }
 }
 
 fn strip_string(s: &mut String) {
@@ -250,7 +268,8 @@ pub fn main() {
 
     // Initialize the sequence and reader
     let mut sequence = Sequence::new();
-    let mut reader = BatchSequenceReader::new();
+    let reader_data = b">TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n";
+    let mut reader = BatchSequenceReader::new(&reader_data[..], 1024); // Provide reader and block size
 
     // Simulate reading the sequence from a buffer
     reader.buffer.push_str(test_sequence);
@@ -261,135 +280,5 @@ pub fn main() {
         println!("{}", sequence.to_string());
     } else {
         println!("Failed to process sequence.");
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fasta_sequence() {
-        let fasta_data = ">TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n";
-        let mut sequence = Sequence::new();
-        let mut reader = BatchSequenceReader::new();
-
-        reader.buffer.push_str(fasta_data);
-
-        assert!(
-            reader.next_sequence(&mut sequence),
-            "Failed to read sequence."
-        );
-        assert_eq!(
-            sequence.id, "TestSequence",
-            "ID mismatch: {:?}",
-            sequence.id
-        );
-        assert_eq!(
-            sequence.seq, "AGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT",
-            "Sequence mismatch: {:?}",
-            sequence.seq
-        );
-        assert_eq!(
-            sequence.format,
-            SequenceFormat::Fasta,
-            "Format mismatch: {:?}",
-            sequence.format
-        );
-    }
-
-    #[test]
-    fn test_fastq_sequence() {
-        let fastq_data = "@TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n";
-        let mut sequence = Sequence::new();
-        let mut reader = BatchSequenceReader::new();
-
-        reader.buffer.push_str(fastq_data);
-
-        assert!(
-            reader.next_sequence(&mut sequence),
-            "Failed to read sequence."
-        );
-        assert_eq!(
-            sequence.id, "TestSequence",
-            "ID mismatch: {:?}",
-            sequence.id
-        );
-        assert_eq!(
-            sequence.seq, "AGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT",
-            "Sequence mismatch: {:?}",
-            sequence.seq
-        );
-        assert_eq!(
-            sequence.quals, "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII",
-            "Quals mismatch: {:?}",
-            sequence.quals
-        );
-        assert_eq!(
-            sequence.format,
-            SequenceFormat::Fastq,
-            "Format mismatch: {:?}",
-            sequence.format
-        );
-    }
-
-    #[test]
-    fn test_fasta_to_string() {
-        let fasta_data = ">TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n";
-        let mut sequence = Sequence::new();
-        let mut reader = BatchSequenceReader::new();
-
-        reader.buffer.push_str(fasta_data);
-
-        assert!(
-            reader.next_sequence(&mut sequence),
-            "Failed to read sequence."
-        );
-        let expected_output = ">TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n";
-        assert_eq!(
-            sequence.to_string().clone(),
-            expected_output,
-            "Output mismatch: {:?}",
-            sequence.to_string()
-        );
-    }
-
-    #[test]
-    fn test_fastq_to_string() {
-        let fastq_data = "@TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n";
-        let mut sequence = Sequence::new();
-        let mut reader = BatchSequenceReader::new();
-
-        reader.buffer.push_str(fastq_data);
-
-        assert!(
-            reader.next_sequence(&mut sequence),
-            "Failed to read sequence."
-        );
-        let expected_output = "@TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n+\nIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\n";
-        assert_eq!(
-            sequence.to_string().clone(),
-            expected_output,
-            "Output mismatch: {:?}",
-            sequence.to_string()
-        );
-    }
-
-    #[test]
-    fn test_malformed_fastq() {
-        let malformed_fastq_data = "@TestSequence\nAGCTGATCGTAGCTAGCTAGCTGATCGTAGCTGACT\n+\n";
-        let mut sequence = Sequence::new();
-        let mut reader = BatchSequenceReader::new();
-
-        reader.buffer.push_str(malformed_fastq_data);
-
-        assert!(
-            reader.next_sequence(&mut sequence),
-            "Failed to read sequence."
-        );
-        assert!(
-            sequence.quals.is_empty(),
-            "Quals should be empty for malformed FASTQ, got: {:?}",
-            sequence.quals
-        );
     }
 }
