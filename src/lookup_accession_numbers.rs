@@ -1,130 +1,87 @@
-/*
- * Copyright 2013-2023, Derrick Wood
- *
- * This file is part of the Kraken 2 taxonomic sequence classification system.
- */
-
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use std::process;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::process::exit;
 
 fn main() {
     // Collect command-line arguments
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: lookup_accession_numbers <lookup file> <accmaps>");
-        process::exit(1);
+        exit(1);
     }
 
-    // Read the lookup list file
     let lookup_file = &args[1];
-    let mut target_lists: HashMap<String, Vec<String>> = HashMap::new();
-    let lookup_list_file = File::open(lookup_file).unwrap_or_else(|_| {
-        eprintln!("Error opening lookup file: {}", lookup_file);
-        process::exit(1);
-    });
+    let accmap_files = &args[2..];
 
+    // Create a map to store target accession numbers and their associated sequence IDs
+    let mut target_lists: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Open and read the lookup file
+    let lookup_list_file = File::open(lookup_file).expect("Failed to open lookup file");
     let reader = BufReader::new(lookup_list_file);
+
+    // Parse the lookup file and populate the target_lists map
     for line in reader.lines() {
-        let line = line.unwrap();
+        let line = line.expect("Failed to read line");
         let fields: Vec<&str> = line.splitn(2, '\t').collect();
-        if fields.len() != 2 {
-            continue;
+        if fields.len() < 2 {
+            continue; // Skip lines that don't have at least two fields
         }
         let seqid = fields[0].to_string();
         let accnum = fields[1].to_string();
-        target_lists
-            .entry(accnum)
-            .or_default()
-            .push(seqid);
+        target_lists.entry(accnum).or_default().push(seqid);
     }
 
     let initial_target_count = target_lists.len();
     let mut accessions_searched: u64 = 0;
 
+    // Display initial progress if stderr is a TTY
     if atty::is(atty::Stream::Stderr) {
         eprint!("\rFound 0/{} targets...", initial_target_count);
     }
 
-    // Process each accmap file
-    for accmap_filename in &args[2..] {
+    // Iterate over the accession map files provided as arguments
+    for accmap_filename in accmap_files {
         if target_lists.is_empty() {
-            // Stop processing files if we've found all we need
-            break;
+            break; // Stop if all targets have been found
         }
 
-        let accmap_path = Path::new(accmap_filename);
-        let accmap_file = File::open(accmap_path).unwrap_or_else(|_| {
-            eprintln!("Error opening accmap file: {}", accmap_filename);
-            process::exit(1);
-        });
-
-        let metadata = accmap_file.metadata().unwrap();
-        let filesize = metadata.len();
-        let mmap = unsafe {
-            memmap2::Mmap::map(&accmap_file).unwrap_or_else(|_| {
-                eprintln!("Error memory-mapping file: {}", accmap_filename);
-                process::exit(1);
-            })
-        };
-
-        let mut ptr = &mmap[..];
+        let accmap_file = File::open(accmap_filename).expect("Failed to open accmap file");
+        let reader = BufReader::new(accmap_file);
+        let mut lines = reader.lines();
 
         // Skip header line
-        if let Some(pos) = ptr.iter().position(|&c| c == b'\n') {
-            ptr = &ptr[pos + 1..];
-        }
+        lines.next();
 
-        while !ptr.is_empty() {
-            if target_lists.is_empty() {
-                // Stop processing file if we've found all we need
-                break;
-            }
+        // Process each line in the accession map file
+        for line_result in lines {
+            let line = line_result.expect("Failed to read line");
+            accessions_searched += 1;
 
-            // Find the end of the current line
-            let line_end = match ptr.iter().position(|&c| c == b'\n') {
-                Some(pos) => pos,
+            let mut fields_iter = line.split('\t');
+            let accnum = match fields_iter.next() {
+                Some(value) => value.to_string(),
                 None => {
-                    eprintln!("expected EOL not found at EOF in {}", accmap_filename);
+                    eprintln!("Expected TAB not found in {}", accmap_filename);
                     break;
                 }
             };
 
-            // Get the line
-            let line = &ptr[..line_end];
-            ptr = &ptr[line_end + 1..];
-
-            // Split the line into fields
-            let mut fields_iter = line.split(|&c| c == b'\t');
-            let accnum_field = fields_iter.next();
-            if accnum_field.is_none() {
-                eprintln!("expected TAB not found in {}", accmap_filename);
-                break;
-            }
-            let accnum = String::from_utf8_lossy(accnum_field.unwrap()).to_string();
-            accessions_searched += 1;
-
+            // Check if the accession number is in our target list
             if target_lists.contains_key(&accnum) {
-                // Skip the next two fields to get to the taxid
-                let mut taxid_field = None;
-                for _ in 0..2 {
-                    taxid_field = fields_iter.next();
-                    if taxid_field.is_none() {
-                        eprintln!("expected TAB not found in {}", accmap_filename);
-                        break;
+                // Skip the next two fields to reach the taxid
+                let taxid = fields_iter.nth(2).unwrap_or_default().to_string();
+
+                // Output the sequence IDs and taxid
+                if let Some(seqids) = target_lists.remove(&accnum) {
+                    for seqid in seqids {
+                        println!("{}\t{}", seqid, taxid);
                     }
                 }
-                if taxid_field.is_none() {
-                    break;
-                }
-                let taxid = String::from_utf8_lossy(taxid_field.unwrap()).to_string();
-                let seqids = target_lists.remove(&accnum).unwrap();
-                for seqid in seqids {
-                    println!("{}\t{}", seqid, taxid);
-                }
+
+                // Update progress display
                 if atty::is(atty::Stream::Stderr) {
                     eprint!(
                         "\rFound {}/{} targets, searched through {} accession IDs...",
@@ -133,8 +90,13 @@ fn main() {
                         accessions_searched
                     );
                 }
+
+                if target_lists.is_empty() {
+                    break; // All targets found
+                }
             }
 
+            // Periodically update progress display
             if accessions_searched % 10_000_000 == 0 && atty::is(atty::Stream::Stderr) {
                 eprint!(
                     "\rFound {}/{} targets, searched through {} accession IDs...",
@@ -146,9 +108,12 @@ fn main() {
         }
     }
 
+    // Clear the progress display
     if atty::is(atty::Stream::Stderr) {
         eprint!("\r");
     }
+
+    // Final progress report
     eprintln!(
         "Found {}/{} targets, searched through {} accession IDs, search complete.",
         initial_target_count - target_lists.len(),
@@ -156,16 +121,16 @@ fn main() {
         accessions_searched
     );
 
+    // Handle any accession numbers that remain unmapped
     if !target_lists.is_empty() {
         eprintln!(
-            "lookup_accession_numbers: {}/{} accession numbers remain unmapped, see \
-              unmapped.txt in DB directory",
+            "lookup_accession_numbers: {}/{} accession numbers remain unmapped, see unmapped.txt",
             target_lists.len(),
             initial_target_count
         );
-        let mut ofs = File::create("unmapped.txt").unwrap();
+        let mut ofs = File::create("unmapped.txt").expect("Failed to create unmapped.txt");
         for accnum in target_lists.keys() {
-            writeln!(ofs, "{}", accnum).unwrap();
+            writeln!(ofs, "{}", accnum).expect("Failed to write to unmapped.txt");
         }
     }
 }

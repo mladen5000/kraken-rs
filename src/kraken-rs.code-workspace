@@ -1,0 +1,67 @@
+{
+  "folders": [
+    {
+      "path": ".."
+    }
+  ],
+  "settings": {
+    "files.associations": {
+      "*.rmd": "markdown",
+      "*.snakefile": "snakemake",
+      "*.snk": "snakemake",
+      "*.tsv": "tsv",
+      "Snakefile": "snakemake",
+      "*.smk": "snakemake",
+      "*.log": "log",
+      "*.json": "json",
+      "*.R": "r",
+      "*.eval": "tsv",
+      "*.md": "markdown",
+      ".zshrc": "shellscript",
+      "string": "cpp",
+      "cassert": "cpp",
+      "__hash_table": "cpp",
+      "__split_buffer": "cpp",
+      "__tree": "cpp",
+      "array": "cpp",
+      "bitset": "cpp",
+      "deque": "cpp",
+      "initializer_list": "cpp",
+      "map": "cpp",
+      "queue": "cpp",
+      "set": "cpp",
+      "string_view": "cpp",
+      "unordered_map": "cpp",
+      "unordered_set": "cpp",
+      "vector": "cpp",
+      "__bit_reference": "cpp",
+      "iterator": "cpp"
+    },
+    "rust-analyzer.linkedProjects": [
+      "./Cargo.toml",
+      "./Cargo.toml",
+      "./Cargo.toml",
+      "./Cargo.toml"
+    ],
+    "explorerExclude.backup": {
+      "**/.git": true,
+      "**/.svn": true,
+      "**/.hg": true,
+      "**/CVS": true,
+      "**/.DS_Store": true,
+      "**/Thumbs.db": true,
+      "**/.ruby-lsp": true,
+      "**/kraken2": true,
+      "kraken2": true,
+      "**/.plandex": true,
+      ".plandex": true,
+      "**/firedbg": true,
+      "firedbg": true,
+      "**/FreeAskInternet": true,
+      "FreeAskInternet": true,
+      "**/.vscode": true,
+      ".vscode": true
+    },
+    "git.ignoreLimitWarning": true
+  }
+}

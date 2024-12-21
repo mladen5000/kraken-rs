@@ -73,8 +73,8 @@ pub mod omp_hack {
 
     pub fn set_num_threads(num: i32) {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(num.try_into().unwrap())
+            .num_threads(num as usize)
             .build_global()
-            .unwrap();
+            .expect("Failed to build global thread pool");
     }
 }

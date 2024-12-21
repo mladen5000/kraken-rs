@@ -5,6 +5,7 @@ pub mod hyperloglogplus;
 
 pub mod kraken2_data;
 pub mod kv_store;
+pub mod mladen;
 pub mod reports;
 pub mod threadpool;
 
@@ -25,10 +26,8 @@ pub mod readcounts;
 // k2mask
 pub mod gz_stream;
 pub mod k2mask;
-
 fn main() {
     println!("Hello, world!");
 
-    // k2mask::main();
-    // seqreader::main();
+    k2mask::run();
 }

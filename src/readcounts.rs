@@ -122,8 +122,10 @@ where
     }
 
     pub fn add_kmer(&mut self, kmer: u64) {
-        self.n_kmers += 1;
-        self.kmers.insert(kmer);
+        if kmer != 0 {
+            self.kmers.insert(kmer);
+            self.n_kmers += 1;
+        }
     }
 
     pub fn merge(&mut self, other: &Self) {

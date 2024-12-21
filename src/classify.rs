@@ -1,35 +1,36 @@
-use crossbeam_channel::bounded;
-use std::collections::{BinaryHeap, HashMap};
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+// lib.rs or main.rs
+
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use clap::{Arg, Command};
-use lazy_static::lazy_static;
+use clap::{App, Arg};
+use rayon::prelude::*;
 
-// Assuming these are defined elsewhere
+use crate::aa_translate::translate_to_all_frames;
 use crate::compact_hash::CompactHashTable;
-use crate::kraken2_data::{IndexOptions, TaxId};
-use crate::kv_store::murmur_hash3;
+use crate::kraken2_data::{taxid_t, TAXID_MAX};
+use crate::kv_store::KeyValueStore;
 use crate::mmscanner::MinimizerScanner;
-use crate::readcounts::{self, HyperLogLogPlusMinus, ReadCounts};
+use crate::readcounts::TaxonCount;
 use crate::reports::{report_kraken_style, report_mpa_style};
-use crate::seqreader::{Sequence, SequenceFormat};
+use crate::seqreader::{BatchequenceReader, Sequence, SequenceFormat};
 use crate::taxonomy::Taxonomy;
-
-lazy_static! {
-    static ref GLOBAL_TAXON_COUNTERS: Mutex<HashMap<TaxId, ReadCounts<readcounts::HyperLogLogPlusMinus>>> =
-        Mutex::new(HashMap::new());
-}
+use crate::utilities::{MaskLowQualityBases, MurmurHash3, SplitString};
 
 const NUM_FRAGMENTS_PER_THREAD: usize = 10000;
-const MATE_PAIR_BORDER_TAXON: TaxId = TaxId::MAX;
-const READING_FRAME_BORDER_TAXON: TaxId = TaxId::MAX - 1;
-const AMBIGUOUS_SPAN_TAXON: TaxId = TaxId::MAX - 2;
+const MATE_PAIR_BORDER_TAXON: taxid_t = TAXID_MAX;
+const READING_FRAME_BORDER_TAXON: taxid_t = TAXID_MAX - 1;
+const AMBIGUOUS_SPAN_TAXON: taxid_t = TAXID_MAX - 2;
 
-#[derive(Clone)]
+#[derive(Default)]
 struct Options {
     index_filename: String,
     taxonomy_filename: String,
@@ -49,9 +50,9 @@ struct Options {
     paired_end_processing: bool,
     single_file_pairs: bool,
     minimum_quality_score: i32,
-    minimum_hit_groups: usize,
+    minimum_hit_groups: i32,
     use_memory_mapping: bool,
-    match_input_order: bool,
+    match_input_order: bool, // Not used in original but declared for completeness
 }
 
 #[derive(Default)]
@@ -61,18 +62,31 @@ struct ClassificationStats {
     total_classified: u64,
 }
 
-#[derive(Default)]
 struct OutputStreamData {
     initialized: bool,
     printing_sequences: bool,
-    classified_output1: Option<Mutex<Box<dyn io::Write + Send>>>,
-    classified_output2: Option<Mutex<Box<dyn io::Write + Send>>>,
-    unclassified_output1: Option<Mutex<Box<dyn io::Write + Send>>>,
-    unclassified_output2: Option<Mutex<Box<dyn io::Write + Send>>>,
-    kraken_output: Option<Mutex<Box<dyn io::Write + Send>>>,
+    classified_output1: Option<BufWriter<File>>,
+    classified_output2: Option<BufWriter<File>>,
+    unclassified_output1: Option<BufWriter<File>>,
+    unclassified_output2: Option<BufWriter<File>>,
+    kraken_output: Option<BufWriter<File>>,
 }
 
-#[derive(Debug, Clone)]
+impl Default for OutputStreamData {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            printing_sequences: false,
+            classified_output1: None,
+            classified_output2: None,
+            unclassified_output1: None,
+            unclassified_output2: None,
+            kraken_output: None,
+        }
+    }
+}
+
+#[derive(Default)]
 struct OutputData {
     block_id: u64,
     kraken_str: String,
@@ -81,847 +95,721 @@ struct OutputData {
     unclassified_out1_str: String,
     unclassified_out2_str: String,
 }
-impl Ord for OutputData {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.block_id.cmp(&self.block_id)
-    }
+
+// Placeholder types, assuming these are defined elsewhere
+type TaxonCountsT = HashMap<taxid_t, u32>;
+type TaxonCountersT = HashMap<taxid_t, readcounts::TaxonCount>; // or appropriate struct
+
+struct IndexOptions {
+    k: usize,
+    l: usize,
+    spaced_seed_mask: u64,
+    dna_db: bool,
+    toggle_mask: u64,
+    revcom_version: u8,
+    minimum_acceptable_hash_value: u64,
 }
 
-impl PartialOrd for OutputData {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for OutputData {
-    fn eq(&self, other: &Self) -> bool {
-        self.block_id == other.block_id
-    }
-}
-
-impl Eq for OutputData {}
-
-fn main() -> io::Result<()> {
-    let mut opts = parse_command_line();
-
-    println!("Loading database information...");
-    let idx_opts = load_index_options(&opts.options_filename)?;
-    opts.use_translated_search = !idx_opts.dna_db;
-
-    let taxonomy = Taxonomy::new(&opts.taxonomy_filename, opts.use_memory_mapping)?;
-    // 10000 entries, 24, 8
-    // let hash = CompactHashTable::new(&opts.index_filename, opts.use_memory_mapping, &idx_opts)?;
-    let hash = CompactHashTable::new(10000, 24, 8);
-
-    println!("done.");
-
-    let stats = Arc::new(Mutex::new(ClassificationStats::default()));
-    let outputs = Arc::new(Mutex::new(OutputStreamData {
-        initialized: false,
-        printing_sequences: false,
-        classified_output1: None,
-        classified_output2: None,
-        unclassified_output1: None,
-        unclassified_output2: None,
-        kraken_output: Some(Mutex::new(Box::new(io::stdout()))),
-    }));
-
-    let start_time = Instant::now();
-
-    // Extract input filenames from command-line arguments
-    let args: Vec<String> = std::env::args().collect();
-    let filename1 = if opts.single_file_pairs {
-        opts.taxonomy_filename.as_str()
-    } else if args.len() > 1 {
-        args[1].as_str()
-    } else {
-        ""
-    };
-
-    let filename2 = if opts.paired_end_processing && args.len() > 2 {
-        if args.len() > 2 {
-            Some(args[2].as_str())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    if args.len() <= 1 {
-        if opts.paired_end_processing && !opts.single_file_pairs {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "paired end processing used with no files specified",
-            ));
-        }
-        process_files(
-            Some(filename1),
-            filename2,
-            Arc::new(hash?),
-            opts.taxonomy_filename.clone(),
-            Arc::new(idx_opts),
-            Arc::new(opts.clone()),
-            Arc::new(Mutex::new(ClassificationStats::default())),
-            Arc::new(Mutex::new(OutputStreamData::default())),
-        )?;
-    } else {
-        process_files(
-            Some(filename1),
-            filename2,
-            Arc::new(hash?),
-            opts.taxonomy_filename.clone(),
-            Arc::new(idx_opts),
-            Arc::new(opts.clone()),
-            Arc::clone(&stats),
-            Arc::clone(&outputs),
-        )?;
-    }
-
-    let elapsed = start_time.elapsed();
-
-    // Lock the Mutex to access ClassificationStats
-    let stats_guard = stats.lock().unwrap();
-
-    // Call report_stats with accessed fields
-    report_stats(elapsed, &*stats_guard);
-
-    // Initialize taxon counters
-    let taxon_counters = GLOBAL_TAXON_COUNTERS.lock().unwrap();
-    if !opts.report_filename.is_empty() {
-        // Lock the Mutex to access ClassificationStats
-        let stats_guard = stats.lock().unwrap();
-
-        // Calculate total_unclassified using the locked data
-        let total_unclassified = stats_guard.total_sequences - stats_guard.total_classified;
-
-        if opts.mpa_style_report {
-            report_mpa_style(
-                &opts.report_filename,
-                opts.report_zero_counts,
-                &taxonomy,
-                &*taxon_counters,
-            )?;
-        } else {
-            // Lock the Mutex to access ClassificationStats
-            let stats_guard = stats.lock().unwrap();
-
-            // Calculate total_unclassified using the locked data
-            let total_unclassified = stats_guard.total_sequences - stats_guard.total_classified;
-
-            // Call report_kraken_style with accessed fields
-            report_kraken_style(
-                &opts.report_filename,
-                opts.report_zero_counts,
-                opts.report_kmer_data,
-                &taxonomy,
-                &*taxon_counters,
-                stats_guard.total_sequences,
-                total_unclassified,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-pub fn process_files(
-    filename1: Option<&str>,
-    filename2: Option<&str>,
-    hash: Arc<CompactHashTable>,
-    taxonomy_filename: String,
-    idx_opts: Arc<IndexOptions>,
-    opts: Arc<Options>,
-    stats: Arc<Mutex<ClassificationStats>>,
-    outputs: Arc<Mutex<OutputStreamData>>,
-) -> io::Result<()> {
-    let (sender, receiver) = bounded(opts.num_threads * 2);
-    let reader1: Box<dyn BufRead> = match filename1 {
-        Some(f) => Box::new(BufReader::new(File::open(f)?)),
-        None => Box::new(io::stdin().lock()),
-    };
-    let reader2 = filename2.map(|f| BufReader::new(File::open(f).unwrap()));
-
-    let next_input_block_id = Arc::new(Mutex::new(0u64));
-    let next_output_block_id = Arc::new(Mutex::new(0u64));
-    let output_queue = Arc::new(Mutex::new(BinaryHeap::new()));
-
-    let reader_opts = Arc::clone(&opts);
-    let reader_thread = thread::spawn(move || -> io::Result<()> {
-        loop {
-            let sequences1 = Vec::new();
-            let sequences2 = if reader_opts.paired_end_processing {
-                Some(Vec::new())
-            } else {
-                None
-            };
-            // Read sequences (similar to your implementation)
-            // ...
-
-            if sequences1.is_empty() {
-                break;
-            }
-
-            let block_id = {
-                let mut id = next_input_block_id.lock().unwrap();
-                let current_id = *id;
-                *id += 1;
-                current_id
-            };
-
-            sender.send((block_id, sequences1, sequences2)).unwrap();
-        }
-        Ok(())
-    });
-
-    let worker_threads: Vec<_> = (0..opts.num_threads)
-        .map(|_| {
-            let receiver = receiver.clone();
-            let hash = Arc::clone(&hash);
-            let taxonomy_filename = taxonomy_filename.clone();
-            let opts = Arc::clone(&opts);
-            let idx_opts = Arc::clone(&idx_opts);
-            let stats = Arc::clone(&stats);
-            let outputs = Arc::clone(&outputs);
-            let next_output_block_id = Arc::clone(&next_output_block_id);
-            let output_queue = Arc::clone(&output_queue);
-
-            thread::spawn(move || {
-                let tax = Taxonomy::new(&taxonomy_filename, opts.use_memory_mapping).unwrap();
-                let mut thread_stats = ClassificationStats::default();
-                let mut thread_taxon_counters: HashMap<
-                    TaxId,
-                    ReadCounts<readcounts::HyperLogLogPlusMinus>,
-                > = HashMap::new();
-
-                let mut scanner = MinimizerScanner::new(
-                    idx_opts.k as isize,
-                    idx_opts.l as isize,
-                    idx_opts.spaced_seed_mask,
-                    idx_opts.dna_db,
-                    idx_opts.toggle_mask,
-                    idx_opts.revcom_version as i32,
-                );
-
-                while let Ok((block_id, sequences1, sequences2)) = receiver.recv() {
-                    let kraken_oss = String::new();
-                    let c1_oss = String::new();
-                    let c2_oss = String::new();
-                    let u1_oss = String::new();
-                    let u2_oss = String::new();
-
-                    for (i, seq1) in sequences1.iter().enumerate() {
-                        let seq2 = sequences2.as_ref().and_then(|seqs| seqs.get(i));
-
-                        let call = classify_sequence(
-                            seq1,
-                            seq2,
-                            &hash,
-                            &tax,
-                            &idx_opts,
-                            &opts,
-                            &mut thread_stats,
-                            &mut scanner,
-                        );
-
-                        thread_stats.total_sequences += 1;
-                        thread_stats.total_bases += seq1.seq.len() as u64;
-                        if let Some(seq2) = seq2 {
-                            thread_stats.total_bases += seq2.seq.len() as u64;
-                        }
-                        thread_taxon_counters
-                            .entry(call)
-                            .or_insert_with(ReadCounts::default)
-                            .increment_read_count();
-                    }
-
-                    let out_data = OutputData {
-                        block_id,
-                        kraken_str: kraken_oss,
-                        classified_out1_str: c1_oss,
-                        classified_out2_str: c2_oss,
-                        unclassified_out1_str: u1_oss,
-                        unclassified_out2_str: u2_oss,
-                    };
-
-                    // Add output data to queue
-                    let mut queue = output_queue.lock().unwrap();
-                    queue.push(out_data);
-
-                    // Process output queue
-                    while let Some(out_data) = queue.peek() {
-                        let mut next_output_block_id = next_output_block_id.lock().unwrap();
-                        if out_data.block_id == *next_output_block_id {
-                            let out_data = queue.pop().unwrap();
-                            drop(queue);
-                            write_output(&out_data, &outputs).unwrap();
-                            *next_output_block_id += 1;
-                            queue = output_queue.lock().unwrap();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Update taxon counters
-                    // This would be implemented similar to the C++ version
-                    // ...
-                }
-                // Update global stats
-                let mut global_stats = stats.lock().unwrap();
-                global_stats.total_sequences += thread_stats.total_sequences;
-                global_stats.total_bases += thread_stats.total_bases;
-                global_stats.total_classified += thread_stats.total_classified;
-                // Update global taxon counters (you'll need to implement this part)
-                update_global_taxon_counters(&thread_taxon_counters);
-            })
-        })
-        .collect();
-
-    // Wait for all threads to complete
-    reader_thread.join().unwrap()?;
-    for thread in worker_threads {
-        thread.join().unwrap();
-    }
-
-    // Process any remaining items in the output queue
-    let mut queue = output_queue.lock().unwrap();
-    while let Some(out_data) = queue.pop() {
-        write_output(&out_data, &outputs)?;
-    }
-
-    Ok(())
-}
-
-fn classify_sequence<'a, 'b>(
-    dna: &'b Sequence,
-    dna2: Option<&'b Sequence>,
-    hash: &'b CompactHashTable,
-    tax: &'b Taxonomy,
-    idx_opts: &'b IndexOptions,
-    opts: &'b Options,
-    stats: &'b mut ClassificationStats,
-    scanner: &'b mut MinimizerScanner<'a>,
-) -> u64
-where
-    'a: 'b,
-{
-    // Initialize vectors and counters
-    let mut taxa = Vec::new();
-    let mut hit_counts = HashMap::new();
-    let frame_ct = if opts.use_translated_search { 6 } else { 1 };
-    let mut minimizer_hit_groups = 0usize;
-
-    // Process each mate (for paired-end sequences)
-    for mate_num in 0..2 {
-        // Break if not processing paired-end sequences and on second iteration
-        if mate_num == 1 && !opts.paired_end_processing {
-            break;
-        }
-
-        // Select the appropriate sequence based on mate number
-        let seq = if mate_num == 0 {
-            &dna.seq
-        } else {
-            match dna2 {
-                Some(seq) => &seq.seq,
-                None => break, // Exit the loop if dna2 is None
-            }
-        };
-
-        // Process the sequence
-        {
-            // Translate sequences if using translated search
-            // if opts.use_translated_search {
-            //     let tx_frames = translate_to_all_frames(seq, frame_ct);
-            //     for frame_idx in 0..frame_ct {
-            //         scanner.load_sequence(&tx_frames[frame_idx], frame_idx, frame_ct);
-            //     }
-            // } else {
-            //     scanner.load_sequence(seq, 0, frame_ct);
-            // }
-
-            let mut last_minimizer = 0u64;
-
-            // Process each minimizer in the sequence
-            while let Some(minimizer) = scanner.next_minimizer() {
-                let taxon = if scanner.is_ambiguous() {
-                    AMBIGUOUS_SPAN_TAXON
-                } else if minimizer != last_minimizer {
-                    // Determine taxon based on minimizer
-                    let taxon = if idx_opts.minimum_acceptable_hash_value == 0
-                        || murmur_hash3(minimizer) >= idx_opts.minimum_acceptable_hash_value
-                    {
-                        hash.get(minimizer)
-                    } else {
-                        0
-                    };
-
-                    if taxon != 0 {
-                        minimizer_hit_groups += 1;
-                        // TODO: Update taxon counters here
-                    }
-
-                    last_minimizer = minimizer;
-                    taxon
-                } else {
-                    continue;
-                };
-
-                if taxon != 0 {
-                    // Return early if in quick mode and minimum hit groups reached
-                    if opts.quick_mode && minimizer_hit_groups >= opts.minimum_hit_groups {
-                        return taxon;
-                    }
-                    *hit_counts.entry(taxon).or_insert(0) += 1;
-                }
-
-                taxa.push(taxon);
-            }
-        }
-
-        // Add frame and mate pair border taxa
-        if opts.use_translated_search {
-            taxa.push(READING_FRAME_BORDER_TAXON);
-        }
-        if opts.paired_end_processing && mate_num == 0 {
-            taxa.push(MATE_PAIR_BORDER_TAXON);
-        }
-    }
-
-    // Calculate total k-mers
-    let total_kmers = {
-        let mut count = taxa.len();
-        if opts.paired_end_processing {
-            count -= 1;
-        }
-        if opts.use_translated_search {
-            count -= if opts.paired_end_processing { 4 } else { 2 };
-        }
-        count
-    };
-
-    // Resolve the taxonomy tree and make the classification call
-
-    // Generate Kraken output string here (implementation needed)
-
-    {
-        let call = resolve_tree(&hit_counts, tax, total_kmers, opts);
-        if call == 0 || minimizer_hit_groups < opts.minimum_hit_groups {
-            0
-        } else {
-            stats.total_classified += 1;
-            // TODO: Update taxon counters for the call
-            call
-        }
-    }
-}
-
-fn resolve_tree(
-    hit_counts: &HashMap<TaxId, u32>,
+// Dummy implementations for external functions that were in original code
+fn report_mpa_style(
+    filename: &str,
+    report_zero_counts: bool,
     taxonomy: &Taxonomy,
-    total_minimizers: usize,
-    opts: &Options,
-) -> TaxId {
-    let mut max_taxon = 0;
-    let mut max_score = 0u32;
-    let required_score = (opts.confidence_threshold * total_minimizers as f64).ceil() as u32;
-
-    // Sum each taxon's LTR path, find taxon with highest LTR score
-    for (&taxon, &count) in hit_counts {
-        let score: u32 = hit_counts
-            .iter()
-            .filter(|(&t, _)| taxonomy.is_a_ancestor_of_b(t, taxon))
-            .map(|(_, &c)| c)
-            .sum();
-
-        if score > max_score {
-            max_score = score;
-            max_taxon = taxon;
-        } else if score == max_score {
-            max_taxon = taxonomy.lowest_common_ancestor(max_taxon, taxon);
-        }
-    }
-
-    // Reset max. score to be only hits at the called taxon
-    max_score = *hit_counts.get(&max_taxon).unwrap_or(&0);
-    // We probably have a call w/o required support (unless LCA resolved tie)
-    while max_taxon != 0 && max_score < required_score {
-        max_score = hit_counts
-            .iter()
-            .filter(|(&t, _)| taxonomy.is_a_ancestor_of_b(max_taxon, t))
-            .map(|(_, &c)| c)
-            .sum();
-
-        if max_score >= required_score {
-            return max_taxon;
-        } else {
-            max_taxon = taxonomy.get_parent(max_taxon).unwrap_or(0);
-        }
-    }
-
-    max_taxon
+    taxon_counters: &TaxonCountersT,
+) -> Result<(), Box<dyn Error>> {
+    reports::report_mpa_style(filename, report_zero_counts, taxonomy, taxon_counters)
 }
-fn add_hitlist_string(oss: &mut String, taxa: &[TaxId], taxonomy: &Taxonomy) {
-    use std::fmt::Write;
+
+fn ReportKrakenStyle(
+    filename: &str,
+    report_zero_counts: bool,
+    report_kmer_data: bool,
+    taxonomy: &Taxonomy,
+    taxon_counters: &TaxonCountersT,
+    total_sequences: u64,
+    total_unclassified: u64,
+) -> Result<(), Box<dyn Error>> {
+    reports::report_kraken_style(
+        filename,
+        report_zero_counts,
+        report_kmer_data,
+        taxonomy,
+        taxon_counters,
+        total_sequences,
+        total_unclassified,
+    )
+}
+
+fn initialize_outputs(
+    opts: &Options,
+    outputs: &mut OutputStreamData,
+    format: SequenceFormat,
+) -> Result<(), Box<dyn Error>> {
+    if (!outputs.initialized) {
+        if (!opts.classified_output_filename.is_empty()) {
+            if (opts.paired_end_processing) {
+                let fields = SplitString(&opts.classified_output_filename, "#");
+                if (fields.len() != 2) {
+                    return Err("Paired filename format missing or extra '#'".into());
+                }
+                outputs.classified_output1 = Some(BufWriter::new(File::create(format!(
+                    "{}_1{}",
+                    fields[0], fields[1]
+                ))?));
+                outputs.classified_output2 = Some(BufWriter::new(File::create(format!(
+                    "{}_2{}",
+                    fields[0], fields[1]
+                ))?));
+            } else {
+                outputs.classified_output1 = Some(BufWriter::new(File::create(
+                    &opts.classified_output_filename,
+                )?));
+            }
+            outputs.printing_sequences = true;
+        }
+
+        if (!opts.unclassified_output_filename.is_empty()) {
+            if (opts.paired_end_processing) {
+                let fields = SplitString(&opts.unclassified_output_filename, "#");
+                if (fields.len() != 2) {
+                    return Err("Paired filename format missing or extra '#'".into());
+                }
+                outputs.unclassified_output1 = Some(BufWriter::new(File::create(format!(
+                    "{}_1{}",
+                    fields[0], fields[1]
+                ))?));
+                outputs.unclassified_output2 = Some(BufWriter::new(File::create(format!(
+                    "{}_2{}",
+                    fields[0], fields[1]
+                ))?));
+            } else {
+                outputs.unclassified_output1 = Some(BufWriter::new(File::create(
+                    &opts.unclassified_output_filename,
+                )?));
+            }
+            outputs.printing_sequences = true;
+        }
+
+        if (!opts.kraken_output_filename.is_empty() && opts.kraken_output_filename != "-") {
+            outputs.kraken_output =
+                Some(BufWriter::new(File::create(&opts.kraken_output_filename)?));
+        }
+
+        outputs.initialized = true;
+    }
+
+    Ok(())
+}
+
+fn add_hitlist_string(oss: &mut String, taxa: &[taxid_t], taxonomy: &Taxonomy) {
     let mut last_code = taxa[0];
     let mut code_count = 1;
 
-    for &code in taxa.iter().skip(1) {
-        if code == last_code {
+    for &code in &taxa[1..] {
+        if (code == last_code) {
             code_count += 1;
         } else {
-            if last_code != MATE_PAIR_BORDER_TAXON && last_code != READING_FRAME_BORDER_TAXON {
-                if last_code == AMBIGUOUS_SPAN_TAXON {
-                    write!(oss, "A:{} ", code_count).unwrap();
+            if (last_code != MATE_PAIR_BORDER_TAXON && last_code != READING_FRAME_BORDER_TAXON) {
+                if (last_code == AMBIGUOUS_SPAN_TAXON) {
+                    oss.push_str(&format!("A:{} ", code_count));
                 } else {
-                    let ext_code = taxonomy.nodes[last_code as usize].external_id;
-                    write!(oss, "{}:{} ", ext_code, code_count).unwrap();
+                    let ext_code = taxonomy.nodes()[last_code as usize].external_id;
+                    oss.push_str(&format!("{}:{} ", ext_code, code_count));
                 }
             } else {
-                write!(
-                    oss,
-                    "{} ",
-                    if last_code == MATE_PAIR_BORDER_TAXON {
-                        "|:|"
-                    } else {
-                        "-:-"
-                    }
-                )
-                .unwrap();
+                // mate pair / reading frame marker
+                oss.push_str(if (last_code == MATE_PAIR_BORDER_TAXON) {
+                    "|:| "
+                } else {
+                    "-:- "
+                });
             }
             code_count = 1;
             last_code = code;
         }
     }
-
-    if last_code != MATE_PAIR_BORDER_TAXON && last_code != READING_FRAME_BORDER_TAXON {
-        if last_code == AMBIGUOUS_SPAN_TAXON {
-            write!(oss, "A:{}", code_count).unwrap();
+    // final block
+    if (last_code != MATE_PAIR_BORDER_TAXON && last_code != READING_FRAME_BORDER_TAXON) {
+        if (last_code == AMBIGUOUS_SPAN_TAXON) {
+            oss.push_str(&format!("A:{}", code_count));
         } else {
-            let ext_code = taxonomy.nodes[last_code as usize].external_id;
-            write!(oss, "{}:{}", ext_code, code_count).unwrap();
+            let ext_code = taxonomy.nodes()[last_code as usize].external_id;
+            oss.push_str(&format!("{}:{}", ext_code, code_count));
         }
     } else {
-        write!(
-            oss,
-            "{}",
-            if last_code == MATE_PAIR_BORDER_TAXON {
-                "|:|"
-            } else {
-                "-:-"
-            }
-        )
-        .unwrap();
+        oss.push_str(if (last_code == MATE_PAIR_BORDER_TAXON) {
+            "|:|"
+        } else {
+            "-:-"
+        });
     }
 }
 
-fn initialize_outputs(
+fn resolve_tree(
+    hit_counts: &TaxonCountsT,
+    taxonomy: &Taxonomy,
+    total_minimizers: usize,
     opts: &Options,
-    outputs: &Mutex<OutputStreamData>,
-    format: SequenceFormat,
-) -> io::Result<()> {
-    let mut outputs = outputs.lock().unwrap();
-    if !outputs.initialized {
-        if !opts.classified_output_filename.is_empty() {
-            if opts.paired_end_processing {
-                let fields: Vec<&str> = opts.classified_output_filename.split('#').collect();
-                if fields.len() != 2 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Paired filename format must contain exactly one '#' character",
-                    ));
-                }
-                outputs.classified_output1 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(format!("{}_1{}", fields[0], fields[1]))?,
-                ))));
-                outputs.classified_output2 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(format!("{}_2{}", fields[0], fields[1]))?,
-                ))));
-            } else {
-                outputs.classified_output1 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(&opts.classified_output_filename)?,
-                ))));
-            }
-            outputs.printing_sequences = true;
-        }
+) -> taxid_t {
+    let required_score = (opts.confidence_threshold * (total_minimizers as f64)).ceil() as u32;
 
-        if !opts.unclassified_output_filename.is_empty() {
-            if opts.paired_end_processing {
-                let fields: Vec<&str> = opts.unclassified_output_filename.split('#').collect();
-                if fields.len() != 2 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Paired filename format must contain exactly one '#' character",
-                    ));
-                }
-                outputs.unclassified_output1 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(format!("{}_1{}", fields[0], fields[1]))?,
-                ))));
-                outputs.unclassified_output2 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(format!("{}_1{}", fields[0], fields[1]))?,
-                ))));
-            } else {
-                outputs.unclassified_output1 = Some(Mutex::new(Box::new(BufWriter::new(
-                    File::create(&opts.unclassified_output_filename)?,
-                ))));
-            }
-            outputs.printing_sequences = true;
-        }
+    let mut max_taxon = 0;
+    let mut max_score = 0;
 
-        if !opts.kraken_output_filename.is_empty() {
-            if opts.kraken_output_filename != "-" {
-                outputs.kraken_output = Some(Mutex::new(Box::new(BufWriter::new(File::create(
-                    &opts.kraken_output_filename,
-                )?))));
-            } else {
-                outputs.kraken_output = Some(Mutex::new(Box::new(io::stdout())));
+    // sum each taxon's LTR path
+    for &taxon in hit_counts.keys() {
+        let mut score = 0;
+        for (&taxon2, &cnt2) in hit_counts.iter() {
+            if (taxonomy.is_ancestor_of(taxon2, taxon)) {
+                score += cnt2;
             }
         }
-
-        if !opts.kraken_output_filename.is_empty() && opts.kraken_output_filename != "-" {
-            outputs.kraken_output = Some(Mutex::new(Box::new(BufWriter::new(File::create(
-                &opts.kraken_output_filename,
-            )?))));
+        if (score > max_score) {
+            max_score = score;
+            max_taxon = taxon;
+        } else if (score == max_score) {
+            max_taxon = taxonomy.lowest_common_ancestor(max_taxon, taxon);
         }
-
-        outputs.initialized = true;
     }
-    Ok(())
+
+    // reset max_score
+    max_score = *hit_counts.get(&max_taxon).unwrap_or(&0);
+    let mut current_taxon = max_taxon;
+
+    while (current_taxon != 0 && max_score < required_score) {
+        // sum hits in that clade
+        let mut clade_score = 0;
+        for (&t, &c) in hit_counts.iter() {
+            if (taxonomy.is_ancestor_of(current_taxon, t)) {
+                clade_score += c;
+            }
+        }
+        if (clade_score >= required_score) {
+            return current_taxon;
+        } else {
+            current_taxon = taxonomy.nodes()[current_taxon as usize].parent_id;
+        }
+    }
+
+    current_taxon
 }
 
-fn mask_low_quality_bases(
+pub fn classify_sequence(
     dna: &mut Sequence,
-    minimum_quality_score: u8,
-) -> Result<(), &'static str> {
-    if dna.format != SequenceFormat::Fastq {
-        return Ok(());
-    }
+    dna2: &mut Sequence,
+    koss: &mut String,
+    hash: &KeyValueStore,
+    taxonomy: &Taxonomy,
+    idx_opts: &IndexOptions,
+    opts: &Options,
+    stats: &mut ClassificationStats,
+    scanner: &mut MinimizerScanner,
+    taxa: &mut Vec<taxid_t>,
+    hit_counts: &mut HashMap<taxid_t, u32>,
+    tx_frames: &mut Vec<String>,
+    curr_taxon_counts: &mut TaxonCountsT,
+) -> taxid_t {
+    taxa.clear();
+    hit_counts.clear();
 
-    if dna.seq.len() != dna.quals.len() {
-        return Err("Sequence length does not match Quality string length");
-    }
+    let mut call: taxid_t = 0;
+    let frame_ct = if opts.use_translated_search { 6 } else { 1 };
+    let mut minimizer_hit_groups: i64 = 0;
 
-    for (base, qual) in unsafe {
-        dna.seq
-            .as_bytes_mut()
-            .iter_mut()
-            .zip(dna.quals.as_bytes().iter())
-    } {
-        if (*qual - b'!') < minimum_quality_score {
-            *base = b'x';
+    // Possibly mask low-quality bases
+    if opts.minimum_quality_score > 0 {
+        mask_low_quality_bases(dna, opts.minimum_quality_score);
+        if opts.paired_end_processing {
+            mask_low_quality_bases(dna2, opts.minimum_quality_score);
         }
     }
 
-    Ok(())
+    // Translated search pre-processing
+    if opts.use_translated_search {
+        TranslateToAllFrames(&dna.seq, tx_frames);
+    }
+
+    'outer: for mate_num in 0..2 {
+        if mate_num == 1 && !opts.paired_end_processing {
+            break;
+        }
+
+        for frame_idx in 0..frame_ct {
+            if opts.use_translated_search {
+                scanner.load_sequence(&tx_frames[frame_idx]);
+            } else {
+                let seq = if mate_num == 0 { &dna.seq } else { &dna2.seq };
+                scanner.load_sequence(seq);
+            }
+
+            let mut last_minimizer = u64::MAX;
+            let mut last_taxon = u64::MAX;
+            while let Some(minimizer) = scanner.next_minimizer() {
+                let taxon = if scanner.is_ambiguous() {
+                    AMBIGUOUS_SPAN_TAXON
+                } else {
+                    if *minimizer != last_minimizer {
+                        let mut found_taxon: taxid_t = 0;
+                        if idx_opts.minimum_acceptable_hash_value == 0
+                            || murmur_hash3(*minimizer) >= idx_opts.minimum_acceptable_hash_value
+                        {
+                            found_taxon = hash.get(*minimizer);
+                        }
+                        last_taxon = found_taxon;
+                        last_minimizer = *minimizer;
+                        if found_taxon != 0 {
+                            minimizer_hit_groups += 1;
+                            // Register kmer in curr_taxon_counts
+                            curr_taxon_counts
+                                .entry(found_taxon)
+                                .or_insert_with(TaxonCounter::default)
+                                .add_kmer(scanner.last_minimizer());
+                        }
+                        found_taxon
+                    } else {
+                        last_taxon
+                    }
+                };
+
+                if taxon != 0 {
+                    if opts.quick_mode && minimizer_hit_groups >= opts.minimum_hit_groups {
+                        call = taxon;
+                        break 'outer;
+                    }
+                    *hit_counts.entry(taxon).or_insert(0) += 1;
+                }
+                taxa.push(taxon);
+            }
+
+            if opts.use_translated_search && frame_idx != frame_ct - 1 {
+                taxa.push(READING_FRAME_BORDER_TAXON);
+            }
+        }
+
+        if opts.paired_end_processing && mate_num == 0 {
+            taxa.push(MATE_PAIR_BORDER_TAXON);
+        }
+    }
+
+    // Compute call if not quick-mode decided
+    if call == 0 {
+        let mut total_kmers = taxa.len();
+        if opts.paired_end_processing {
+            total_kmers -= 1; // account for mate pair marker
+        }
+        if opts.use_translated_search {
+            // account for reading frame markers (2 if single-end, 4 if paired)
+            total_kmers -= if opts.paired_end_processing { 4 } else { 2 };
+        }
+
+        call = ResolveTree(hit_counts, taxonomy, total_kmers, opts);
+        if call != 0 && minimizer_hit_groups < opts.minimum_hit_groups {
+            call = 0;
+        }
+    }
+
+    // Update stats and classification counters
+    if call != 0 {
+        stats.total_classified += 1;
+        curr_taxon_counts
+            .entry(call)
+            .or_insert_with(TaxonCounter::default)
+            .increment_read_count();
+    }
+
+    // Print result line
+    if call != 0 {
+        write!(koss, "C\t").unwrap();
+    } else {
+        write!(koss, "U\t").unwrap();
+    }
+
+    let read_id = if opts.paired_end_processing {
+        TrimPairInfo(&dna.id)
+    } else {
+        dna.id.clone()
+    };
+    write!(koss, "{}\t", read_id).unwrap();
+
+    let ext_call = taxonomy.nodes()[call].external_id;
+    if opts.print_scientific_name {
+        let name = if call != 0 {
+            taxonomy.name_data_at_offset(taxonomy.nodes()[call].name_offset)
+        } else {
+            "unclassified"
+        };
+        write!(koss, "{} (taxid {})\t", name, ext_call).unwrap();
+    } else {
+        write!(koss, "{}\t", ext_call).unwrap();
+    }
+
+    if !opts.paired_end_processing {
+        write!(koss, "{}\t", dna.seq.len()).unwrap();
+    } else {
+        write!(koss, "{}|{}\t", dna.seq.len(), dna2.seq.len()).unwrap();
+    }
+
+    if opts.quick_mode {
+        write!(koss, "{}:Q\n", ext_call).unwrap();
+    } else {
+        if taxa.is_empty() {
+            write!(koss, "0:0\n").unwrap();
+        } else {
+            AddHitlistString(koss, taxa, taxonomy);
+            writeln!(koss).unwrap();
+        }
+    }
+
+    call
 }
 
-fn parse_command_line() -> Options {
-    let matches = Command::new("classify")
-        .arg(
-            Arg::new("index")
-                .short('H')
-                .long("index")
-                .value_name("FILE")
-                .help("Kraken 2 index filename")
-                .required(true),
-        )
-        .arg(
-            Arg::new("taxonomy")
-                .short('t')
-                .long("taxonomy")
-                .value_name("FILE")
-                .help("Kraken 2 taxonomy filename")
-                .required(true),
-        )
-        .arg(
-            Arg::new("options")
-                .short('o')
-                .long("options")
-                .value_name("FILE")
-                .help("Kraken 2 options filename")
-                .required(true),
-        )
-        .arg(
-            Arg::new("quick")
-                .short('q')
-                .long("quick")
-                .help("Quick mode"),
-        )
-        .arg(
-            Arg::new("memory-mapping")
-                .short('M')
-                .long("memory-mapping")
-                .help("Use memory mapping to access hash & taxonomy"),
-        )
-        .arg(
-            Arg::new("confidence")
-                .short('T')
-                .long("confidence")
-                .value_name("NUM")
-                .help("Confidence score threshold (def. 0)"),
-        )
-        .arg(
-            Arg::new("threads")
-                .short('p')
-                .long("threads")
-                .value_name("NUM")
-                .help("Number of threads (def. 1)"),
-        )
-        .arg(
-            Arg::new("min-quality")
-                .short('Q')
-                .long("min-quality")
-                .value_name("NUM")
-                .help("Minimum quality score (FASTQ only, def. 0)"),
-        )
-        .arg(
-            Arg::new("paired")
-                .short('P')
-                .long("paired")
-                .help("Process pairs of reads"),
-        )
-        .arg(
-            Arg::new("single-file-pairs")
-                .short('S')
-                .long("single-file-pairs")
-                .help("Process pairs with mates in same file"),
-        )
-        .arg(
-            Arg::new("report")
-                .short('R')
-                .long("report")
-                .value_name("FILE")
-                .help("Print report to filename"),
-        )
-        .arg(
-            Arg::new("mpa-style")
-                .short('m')
-                .long("mpa-style")
-                .help("In comb. w/ -R, use mpa-style report"),
-        )
-        .arg(
-            Arg::new("report-zero-counts")
-                .short('z')
-                .long("report-zero-counts")
-                .help("In comb. w/ -R, report taxa w/ 0 count"),
-        )
-        .arg(
-            Arg::new("scientific-name")
-                .short('n')
-                .long("scientific-name")
-                .help("Print scientific name instead of taxid in Kraken output"),
-        )
-        .arg(
-            Arg::new("hit-groups")
-                .short('g')
-                .long("hit-groups")
-                .value_name("NUM")
-                .help("Minimum number of hit groups needed for call"),
-        )
-        .arg(
-            Arg::new("classified-output")
-                .short('C')
-                .long("classified-output")
-                .value_name("FILE")
-                .help("Filename/format to have classified sequences"),
-        )
-        .arg(
-            Arg::new("unclassified-output")
-                .short('U')
-                .long("unclassified-output")
-                .value_name("FILE")
-                .help("Filename/format to have unclassified sequences"),
-        )
-        .arg(
-            Arg::new("kraken-output")
-                .short('O')
-                .long("kraken-output")
-                .value_name("FILE")
-                .help("Output file for normal Kraken output"),
-        )
-        .arg(
-            Arg::new("report-kmer-data")
-                .short('K')
-                .long("report-kmer-data")
-                .help("In comb. w/ -R, provide minimizer information in report"),
-        )
-        .get_matches();
-
-    Options {
-        index_filename: matches
-            .get_one::<String>("index")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        taxonomy_filename: matches
-            .get_one::<String>("taxonomy")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        options_filename: matches
-            .get_one::<String>("options")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        quick_mode: matches.contains_id("quick"),
-        use_memory_mapping: matches.contains_id("memory-mapping"),
-        confidence_threshold: matches
-            .get_one::<String>("confidence")
-            .unwrap_or(&"0".to_string())
-            .parse()
-            .unwrap(),
-        num_threads: matches
-            .get_one::<String>("threads")
-            .unwrap_or(&"1".to_string())
-            .parse()
-            .unwrap(),
-        minimum_quality_score: matches
-            .get_one::<String>("min-quality")
-            .unwrap_or(&"0".to_string())
-            .parse()
-            .unwrap(),
-        paired_end_processing: matches.contains_id("paired"),
-        single_file_pairs: matches.contains_id("single-file-pairs"),
-        report_filename: matches
-            .get_one::<String>("report")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        mpa_style_report: matches.contains_id("mpa-style"),
-        report_zero_counts: matches.contains_id("report-zero-counts"),
-        print_scientific_name: matches.contains_id("scientific-name"),
-        minimum_hit_groups: matches
-            .get_one::<String>("hit-groups")
-            .unwrap_or(&"0".to_string())
-            .parse()
-            .unwrap(),
-        classified_output_filename: matches
-            .get_one::<String>("classified-output")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        unclassified_output_filename: matches
-            .get_one::<String>("unclassified-output")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        kraken_output_filename: matches
-            .get_one::<String>("kraken-output")
-            .unwrap_or(&"".to_string())
-            .to_string(),
-        report_kmer_data: matches.contains_id("report-kmer-data"),
-        use_translated_search: false, // This will be set later based on the index options
-        match_input_order: false,     // This option is not present in the command line arguments
+fn trim_pair_info(id: &str) -> String {
+    let sz = id.len();
+    if (sz <= 2) {
+        return id.to_string();
+    }
+    let bytes = id.as_bytes();
+    if (bytes[sz - 2] == b'/' && (bytes[sz - 1] == b'1' || bytes[sz - 1] == b'2')) {
+        id[..sz - 2].to_string()
+    } else {
+        id.to_string()
     }
 }
 
-fn load_index_options(filename: &str) -> io::Result<IndexOptions> {
-    // Implementation here
-    unimplemented!();
-    Ok(IndexOptions::default())
+pub fn process_files(
+    filename1: Option<&str>,
+    filename2: Option<&str>,
+    hash: &KeyValueStore,
+    tax: &Taxonomy,
+    idx_opts: &IndexOptions,
+    opts: &Options,
+    stats: &Arc<Mutex<ClassificationStats>>,
+    outputs: &Arc<Mutex<OutputStreamData>>,
+    total_taxon_counters: &Arc<Mutex<TaxonCountersT>>,
+) {
+    let fptr1: Box<dyn BufRead> = if let Some(fname) = filename1 {
+        Box::new(BufReader::new(
+            File::open(fname).expect("Unable to open file1"),
+        ))
+    } else {
+        Box::new(BufReader::new(stdin()))
+    };
+
+    let fptr2: Option<Box<dyn BufRead>> = if opts.paired_end_processing && !opts.single_file_pairs {
+        Some(Box::new(BufReader::new(
+            File::open(filename2.expect("No paired file provided")).expect("Unable to open file2"),
+        )))
+    } else {
+        None
+    };
+
+    // We will create channels for communication:
+    // - A channel from main reading thread to workers: (block_id, batch_of_sequences)
+    // - A channel from workers back to main output thread: OutputData
+    let (work_tx, work_rx) = unbounded::<(u64, Vec<(Sequence, Option<Sequence>)>)>();
+    let (result_tx, result_rx) = unbounded::<OutputData>();
+
+    // Reading thread
+    // This thread is responsible for reading sequences in blocks and sending them to workers.
+    let opts_clone = opts.clone();
+    let paired = opts.paired_end_processing;
+    let single_file_pairs = opts.single_file_pairs;
+    let mut block_id_counter = 0u64;
+
+    let handle_reader = {
+        let opts_clone = opts_clone;
+        let mut reader1 = BatchequenceReader::new();
+        let mut reader2 = if paired && !single_file_pairs {
+            Some(BatchequenceReader::new())
+        } else {
+            None
+        };
+
+        let mut fptr1 = fptr1;
+        let mut fptr2 = fptr2;
+        thread::spawn(move || {
+            loop {
+                let ok_read = if !paired {
+                    // Unpaired data: load a chunk of ~3MB
+                    reader1.load_block(&mut *fptr1, 3 * 1024 * 1024)
+                } else if !single_file_pairs {
+                    // Paired data in 2 files: load fixed # of fragments from each
+                    let r1 = reader1.load_batch(&mut *fptr1, NUM_FRAGMENTS_PER_THREAD);
+                    let r2 = if r1 {
+                        reader2
+                            .as_mut()
+                            .unwrap()
+                            .load_batch(&mut *fptr2.as_mut().unwrap(), NUM_FRAGMENTS_PER_THREAD)
+                    } else {
+                        false
+                    };
+                    r1 && r2
+                } else {
+                    // Paired data in single file: load double number of sequences
+                    let frags = NUM_FRAGMENTS_PER_THREAD * 2;
+                    reader1.load_batch(&mut *fptr1, frags)
+                };
+
+                if !ok_read {
+                    // no more data
+                    break;
+                }
+
+                let mut sequences = Vec::new();
+                loop {
+                    let mut seq1 = Sequence::default();
+                    let valid_fragment = reader1.next_sequence(&mut seq1);
+                    if paired && valid_fragment {
+                        let mut seq2 = Sequence::default();
+                        let valid_fragment = if single_file_pairs {
+                            reader1.next_sequence(&mut seq2)
+                        } else {
+                            reader2.as_mut().unwrap().next_sequence(&mut seq2)
+                        };
+                        if !valid_fragment {
+                            break;
+                        }
+                        sequences.push((seq1, Some(seq2)));
+                    } else if valid_fragment {
+                        sequences.push((seq1, None));
+                    } else {
+                        break;
+                    }
+                }
+                let current_block_id = block_id_counter;
+                block_id_counter += 1;
+                work_tx.send((current_block_id, sequences)).unwrap();
+            }
+            // Signal no more work
+            drop(work_tx);
+        })
+    };
+
+    // Worker threads: use a thread pool. For simplicity, spawn a fixed number of threads equal to opts.num_threads.
+    // Each worker receives blocks of sequences, classifies them, and sends results back.
+    let taxonomy = Arc::new(tax.clone());
+    let hash_arc = Arc::new(hash.clone());
+    let idx_opts_arc = Arc::new(idx_opts.clone());
+    let opts_arc = Arc::new(opts.clone());
+
+    let mut handles = Vec::new();
+    for _ in 0..opts.num_threads {
+        let work_rx = work_rx.clone();
+        let result_tx = result_tx.clone();
+        let taxonomy = Arc::clone(&taxonomy);
+        let hash_arc = Arc::clone(&hash_arc);
+        let idx_opts_arc = Arc::clone(&idx_opts_arc);
+        let opts_arc = Arc::clone(&opts_arc);
+        let stats_arc = Arc::clone(&stats);
+        let total_taxon_counters = Arc::clone(&total_taxon_counters);
+        let outputs_arc = Arc::clone(&outputs);
+
+        handles.push(thread::spawn(move || {
+            let mut scanner = MinimizerScanner::new(
+                idx_opts_arc.k,
+                idx_opts_arc.l,
+                idx_opts_arc.spaced_seed_mask,
+                idx_opts_arc.dna_db,
+                idx_opts_arc.toggle_mask,
+                idx_opts_arc.revcom_version,
+            );
+            let mut taxa = Vec::new();
+            let mut hit_counts: TaxonCountsT = TaxonCountsT::default();
+            let mut translated_frames = vec![String::new(); 6];
+            let mut local_taxon_counters: TaxonCountersT = TaxonCountersT::default();
+
+            loop {
+                let (block_id, sequences) = match work_rx.recv() {
+                    Ok(data) => data,
+                    Err(_) => break, // no more data
+                };
+
+                let mut thread_stats = ClassificationStats {
+                    total_sequences: 0,
+                    total_bases: 0,
+                    total_classified: 0,
+                };
+
+                let mut kraken_str = String::new();
+                let mut classified_out1_str = String::new();
+                let mut classified_out2_str = String::new();
+                let mut unclassified_out1_str = String::new();
+                let mut unclassified_out2_str = String::new();
+
+                // Lazy initialization of outputs, done once
+                {
+                    let mut outputs = outputs_arc.lock().unwrap();
+                    if !outputs.initialized {
+                        // Just pick format from the input sequences (assuming we know it)
+                        let format = sequences
+                            .first()
+                            .map(|(s, _)| s.format)
+                            .unwrap_or(SequenceFormat::Fasta);
+                        InitializeOutputs(&opts_arc, &mut outputs, format);
+                    }
+                }
+
+                for (mut seq1, seq2_opt) in sequences {
+                    thread_stats.total_sequences += 1;
+                    if opts_arc.minimum_quality_score > 0 {
+                        MaskLowQualityBases(&mut seq1, opts_arc.minimum_quality_score);
+                        if let Some(ref mut seq2) = seq2_opt.as_ref().cloned() {
+                            let mut seq2_cloned = seq2.clone();
+                            MaskLowQualityBases(&mut seq2_cloned, opts_arc.minimum_quality_score);
+                        }
+                    }
+
+                    let call = ClassifySequence(
+                        &mut seq1,
+                        seq2_opt.as_ref().map(|s| s.clone()).unwrap_or_default(),
+                        &mut kraken_str,
+                        &hash_arc,
+                        &taxonomy,
+                        &idx_opts_arc,
+                        &opts_arc,
+                        &mut thread_stats,
+                        &mut scanner,
+                        &mut taxa,
+                        &mut hit_counts,
+                        &mut translated_frames,
+                        &mut local_taxon_counters,
+                    );
+
+                    // Append classified/unclassified sequences
+                    if call != 0 {
+                        // Append to classified outputs
+                        let ext_call = taxonomy.nodes()[call].external_id;
+                        seq1.header.push_str(&format!(" kraken:taxid|{}", ext_call));
+                        classified_out1_str.push_str(&seq1.to_string());
+                        if let Some(mut seq2) = seq2_opt {
+                            seq2.header.push_str(&format!(" kraken:taxid|{}", ext_call));
+                            classified_out2_str.push_str(&seq2.to_string());
+                        }
+                    } else {
+                        // Append to unclassified outputs
+                        unclassified_out1_str.push_str(&seq1.to_string());
+                        if let Some(seq2) = seq2_opt {
+                            unclassified_out2_str.push_str(&seq2.to_string());
+                        }
+                    }
+
+                    thread_stats.total_bases += seq1.seq.len() as u64;
+                    if let Some(seq2) = seq2_opt {
+                        thread_stats.total_bases += seq2.seq.len() as u64;
+                    }
+
+                    taxa.clear();
+                    hit_counts.clear();
+                }
+
+                // Update global stats
+                {
+                    let mut s = stats_arc.lock().unwrap();
+                    s.total_sequences += thread_stats.total_sequences;
+                    s.total_bases += thread_stats.total_bases;
+                    s.total_classified += thread_stats.total_classified;
+                }
+
+                // Update taxon counters
+                {
+                    let mut global_taxon_counters = total_taxon_counters.lock().unwrap();
+                    for (k, v) in local_taxon_counters.drain() {
+                        let entry = global_taxon_counters
+                            .entry(k)
+                            .or_insert_with(|| TaxonCounter::default());
+                        entry.merge(v);
+                    }
+                }
+
+                // Send output data back
+                let out_data = OutputData {
+                    block_id,
+                    kraken_str,
+                    classified_out1_str,
+                    classified_out2_str,
+                    unclassified_out1_str,
+                    unclassified_out2_str,
+                };
+                result_tx.send(out_data).unwrap();
+            }
+        }));
+    }
+
+    drop(work_rx); // Close sending side if reading ended
+    drop(result_tx); // Will close after workers done
+
+    // Output thread: we now need to print in order
+    // Since we have block_ids, we can use a min-heap or just track next_output_block_id
+    let mut next_output_block_id = 0u64;
+    let mut pq = BinaryHeap::new(); // We'll store Reverse(block_id) to get smallest first
+
+    let mut outputs_locked = outputs.lock().unwrap();
+    let stdout_handle = stdout();
+    let kraken_output = outputs_locked.kraken_output.as_mut();
+    let c_out1 = outputs_locked.classified_output1.as_mut();
+    let c_out2 = outputs_locked.classified_output2.as_mut();
+    let u_out1 = outputs_locked.unclassified_output1.as_mut();
+    let u_out2 = outputs_locked.unclassified_output2.as_mut();
+    drop(outputs_locked); // release lock
+
+    for result in result_rx {
+        // Insert into priority queue
+        pq.push((Reverse(result.block_id), result));
+
+        while let Some((Reverse(bid), out_data)) = pq.peek().cloned() {
+            if bid == next_output_block_id {
+                // This is the next block to print
+                pq.pop();
+                if let Some(kout) = kraken_output {
+                    write!(kout, "{}", out_data.kraken_str).ok();
+                }
+                if let Some(c1) = c_out1 {
+                    write!(c1, "{}", out_data.classified_out1_str).ok();
+                }
+                if let Some(c2) = c_out2 {
+                    write!(c2, "{}", out_data.classified_out2_str).ok();
+                }
+                if let Some(u1) = u_out1 {
+                    write!(u1, "{}", out_data.unclassified_out1_str).ok();
+                }
+                if let Some(u2) = u_out2 {
+                    write!(u2, "{}", out_data.unclassified_out2_str).ok();
+                }
+                next_output_block_id += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Wait for reader and workers to finish
+    handle_reader.join().expect("Reader thread panicked");
+    for h in handles {
+        h.join().expect("Worker thread panicked");
+    }
+
+    // Flush outputs
+    if let Some(kout) = kraken_output {
+        kout.flush().ok();
+    }
+    if let Some(c1) = c_out1 {
+        c1.flush().ok();
+    }
+    if let Some(c2) = c_out2 {
+        c2.flush().ok();
+    }
+    if let Some(u1) = u_out1 {
+        u1.flush().ok();
+    }
+    if let Some(u2) = u_out2 {
+        u2.flush().ok();
+    }
 }
 
-fn report_stats(elapsed: std::time::Duration, stats: &ClassificationStats) {
+fn report_stats(start: Instant, stats: &ClassificationStats) {
+    let elapsed = start.elapsed();
     let seconds = elapsed.as_secs_f64();
     let total_unclassified = stats.total_sequences - stats.total_classified;
-
-    if atty::is(atty::Stream::Stderr) {
-        eprint!("\r");
-    }
 
     eprintln!(
         "{} sequences ({:.2} Mbp) processed in {:.3}s ({:.1} Kseq/m, {:.2} Mbp/m).",
@@ -931,13 +819,11 @@ fn report_stats(elapsed: std::time::Duration, stats: &ClassificationStats) {
         stats.total_sequences as f64 / 1.0e3 / (seconds / 60.0),
         stats.total_bases as f64 / 1.0e6 / (seconds / 60.0)
     );
-
     eprintln!(
         "  {} sequences classified ({:.2}%)",
         stats.total_classified,
         stats.total_classified as f64 * 100.0 / stats.total_sequences as f64
     );
-
     eprintln!(
         "  {} sequences unclassified ({:.2}%)",
         total_unclassified,
@@ -945,95 +831,165 @@ fn report_stats(elapsed: std::time::Duration, stats: &ClassificationStats) {
     );
 }
 
-fn write_output(out_data: &OutputData, outputs: &Arc<Mutex<OutputStreamData>>) -> io::Result<()> {
-    let outputs = outputs.lock().unwrap();
-    if let Some(ref kraken_output) = outputs.kraken_output {
-        kraken_output
-            .lock()
-            .unwrap()
-            .write_all(out_data.kraken_str.as_bytes())?;
+fn parse_command_line() -> Result<Options, Box<dyn Error>> {
+    let matches = App::new("classify")
+        .arg(
+            Arg::with_name("H")
+                .short("H")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("t")
+                .short("t")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("o")
+                .short("o")
+                .takes_value(true)
+                .required(true),
+        )
+        // ... add other args similarly ...
+        .get_matches();
+
+    let mut opts = Options::default();
+    opts.index_filename = matches.value_of("H").unwrap().to_string();
+    opts.taxonomy_filename = matches.value_of("t").unwrap().to_string();
+    opts.options_filename = matches.value_of("o").unwrap().to_string();
+    // Parse other options similarly
+    Ok(opts)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut opts = parse_command_line()?;
+
+    // Load index options
+    // load idx_opts from file
+    let idx_opts = IndexOptions {
+        k: 31,
+        l: 15,
+        spaced_seed_mask: 0,
+        dna_db: true,
+        toggle_mask: 0,
+        revcom_version: 2,
+        minimum_acceptable_hash_value: 0,
+    };
+
+    // load taxonomy
+    let taxonomy = Taxonomy::new(&opts.taxonomy_filename, opts.use_memory_mapping)?;
+
+    // load hash
+    let hash_ptr =
+        compact_hash::CompactHashTable::new(&opts.index_filename, opts.use_memory_mapping)?;
+
+    let mut stats = ClassificationStats::default();
+    let mut outputs = OutputStreamData::default();
+    let mut taxon_counters = TaxonCountersT::new();
+
+    let start = Instant::now();
+
+    // Process input files
+    // If no input files, process stdin
+    let args: Vec<String> = std::env::args().collect();
+    // This is simplified logic from original code
+    let input_files = &args[1..];
+
+    if (input_files.is_empty()) {
+        if (opts.paired_end_processing && !opts.single_file_pairs) {
+            return Err("paired end processing used with no files specified".into());
+        }
+        process_files(
+            None,
+            None,
+            &hash_ptr,
+            &taxonomy,
+            &idx_opts,
+            &opts,
+            &mut stats,
+            &mut outputs,
+            &mut taxon_counters,
+        )?;
+    } else {
+        let mut i = 0;
+        while (i < input_files.len()) {
+            if (opts.paired_end_processing && !opts.single_file_pairs) {
+                if (i + 1 == input_files.len()) {
+                    return Err("paired end processing used with unpaired file".into());
+                }
+                process_files(
+                    Some(&input_files[i]),
+                    Some(&input_files[i + 1]),
+                    &hash_ptr,
+                    &taxonomy,
+                    &idx_opts,
+                    &opts,
+                    &mut stats,
+                    &mut outputs,
+                    &mut taxon_counters,
+                )?;
+                i += 2;
+            } else {
+                process_files(
+                    Some(&input_files[i]),
+                    None,
+                    &hash_ptr,
+                    &taxonomy,
+                    &idx_opts,
+                    &opts,
+                    &mut stats,
+                    &mut outputs,
+                    &mut taxon_counters,
+                )?;
+                i += 1;
+            }
+        }
     }
-    if let Some(ref classified_output1) = outputs.classified_output1 {
-        classified_output1
-            .lock()
-            .unwrap()
-            .write_all(out_data.classified_out1_str.as_bytes())?;
+
+    report_stats(start, &stats);
+
+    if (!opts.report_filename.is_empty()) {
+        let total_unclassified = stats.total_sequences - stats.total_classified;
+        if (opts.mpa_style_report) {
+            report_mpa_style(
+                &opts.report_filename,
+                opts.report_zero_counts,
+                &taxonomy,
+                &taxon_counters,
+            )?;
+        } else {
+            ReportKrakenStyle(
+                &opts.report_filename,
+                opts.report_zero_counts,
+                opts.report_kmer_data,
+                &taxonomy,
+                &taxon_counters,
+                stats.total_sequences,
+                total_unclassified,
+            )?;
+        }
     }
-    if let Some(ref classified_output2) = outputs.classified_output2 {
-        classified_output2
-            .lock()
-            .unwrap()
-            .write_all(out_data.classified_out2_str.as_bytes())?;
-    }
-    if let Some(ref unclassified_output1) = outputs.unclassified_output1 {
-        unclassified_output1
-            .lock()
-            .unwrap()
-            .write_all(out_data.unclassified_out1_str.as_bytes())?;
-    }
-    if let Some(ref unclassified_output2) = outputs.unclassified_output2 {
-        unclassified_output2
-            .lock()
-            .unwrap()
-            .write_all(out_data.unclassified_out2_str.as_bytes())?;
-    }
+
     Ok(())
 }
 
-fn update_global_taxon_counters(
-    thread_counters: &HashMap<TaxId, ReadCounts<readcounts::HyperLogLogPlusMinus>>,
-) {
-    let mut global_counters = GLOBAL_TAXON_COUNTERS.lock().unwrap();
-    for (taxid, count) in thread_counters {
-        global_counters
-            .entry(*taxid)
-            .or_insert_with(ReadCounts::default)
-            .merge(count);
-    }
-}
-
-fn process_sequences<'a, 'b>(
-    sequences1: &'a [Sequence],
-    sequences2: Option<&'a [Sequence]>,
-    hash: &'a CompactHashTable,
-    tax: &'a Taxonomy,
-    idx_opts: &'a IndexOptions,
-    opts: &'a Options,
-    thread_stats: &'a mut ClassificationStats,
-    scanner: &'a mut MinimizerScanner<'b>,
-) -> Vec<(TaxId, String, String, String, String, String)>
-where
-    'a: 'b,
-{
+fn classify_reads(reads: Vec<String>, db: Arc<Mutex<HashMap<String, String>>>) -> Vec<String> {
     let mut results = Vec::new();
+    let mut handles = vec![];
 
-    for (i, seq1) in sequences1.iter().enumerate() {
-        let seq2 = if opts.paired_end_processing {
-            // sequences2.as_ref().and_then(|seqs| seqs.get(i).cloned())
-            sequences2.and_then(|seqs| seqs.get(i))
-        } else {
-            None
-        };
+    for read in reads {
+        let db = Arc::clone(&db);
+        let handle = thread::spawn(move || {
+            let db = db.lock().unwrap();
+            // ...existing code...
+            results.push(result);
+        });
+        handles.push(handle);
+    }
 
-        let call = classify_sequence(seq1, seq2, hash, tax, idx_opts, opts, thread_stats, scanner);
-
-        let kraken_oss = String::new();
-        let c1_oss = String::new();
-        let c2_oss = String::new();
-        let u1_oss = String::new();
-        let u2_oss = String::new();
-
-        // Update output strings based on classification result
-        // This part would be similar to the C++ implementation
-        // ...
-
-        thread_stats.total_sequences += 1;
-        thread_stats.total_bases += seq1.seq.len() as u64;
-        if let Some(seq2) = seq2 {
-            thread_stats.total_bases += seq2.seq.len() as u64;
-        }
-
-        results.push((call, kraken_oss, c1_oss, c2_oss, u1_oss, u2_oss));
+    for handle in handles {
+        handle.join().unwrap();
     }
 
     results

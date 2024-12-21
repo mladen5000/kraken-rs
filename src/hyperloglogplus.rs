@@ -1,373 +1,380 @@
-// hyperloglogplus.rs
+/*
+ * Copyright 2017-2018, Florian Breitwieser
+ *
+ * This file was originally developed for the KrakenUniq taxonomic classification system.
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
 
-use std::collections::HashSet;
+/*
+ * Implementation of 64-bit HyperLogLog algorithm by Flajolet et al.,
+ * with sparse mode for increased precision with low cardinalities (Stefan Heule et al.), and
+ * an improved estimator that does not rely on empirical bias correction data (Otmar Ertl)
+ */
 
-/// 64-bit Mixer/Finalizer from MurmurHash3.
-/// Replace this with an actual MurmurHash3 finalizer or use a reliable crate.
-/// This is a placeholder implementation.
-pub fn murmurhash3_finalizer(key: u64) -> u64 {
-    let mut k = key;
-    k ^= k >> 33;
-    k = k.wrapping_mul(0xff51afd7ed558ccd);
-    k ^= k >> 33;
-    k = k.wrapping_mul(0xc4ceb9fe1a85ec53);
-    k ^= k >> 33;
-    k
-}
+use std::collections::{BTreeSet, HashMap};
+use std::hash::BuildHasherDefault;
+use std::io;
+use std::marker::PhantomData;
 
-/// Type alias for the sparse list.
-/// Using HashSet for average constant-time insertions and lookups.
-type SparseListType = HashSet<u32>;
+use std::cmp::Ordering;
+use std::f64::consts::LN_2;
+use std::mem;
+use std::u32;
 
-/// HyperLogLogPlusMinus struct for counting the number of unique 64-bit values in a stream.
-/// Only `u64` hashes are implemented.
-pub struct HyperLogLogPlusMinus<H = fn(u64) -> u64> {
-    p: u8,                // Precision
-    m: usize,             // Number of registers (m = 2^p)
-    m_registers: Vec<u8>, // Registers
-    n_observed: u64,      // Number of observed elements
+use std::fmt::Debug;
+
+/// Type alias for the hash function
+pub type HashFunction = fn(u64) -> u64;
+
+/// SparseListType can be a BTreeSet for sorted elements
+type SparseListType = BTreeSet<u32>;
+
+/// HyperLogLogPlusMinus class for counting the number of unique 64-bit values in a stream
+/// Note that only HASH = u64 is implemented.
+pub struct HyperLogLogPlusMinus<HASH = u64> {
+    p: u8,           // Precision
+    m: usize,        // Number of registers
+    M: Vec<u8>,      // Registers
+    n_observed: u64, // Number of observed elements
 
     sparse: bool,                // Sparse representation flag
-    sparse_list: SparseListType, // Sparse list
+    sparse_list: SparseListType, // Sparse list for low cardinalities
 
-    bit_mixer: H, // Hash mixer function
+    // Sparse versions of p and m
+    p_prime: u8,  // Precision when using sparse representation
+    m_prime: u32, // Number of registers in sparse mode
 
-    // Sparse representation parameters
-    const_p_prime: u8,    // Precision for sparse representation (pPrime)
-    const_m_prime: usize, // Number of registers for sparse representation (mPrime = 2^pPrime)
+    bit_mixer: HashFunction, // Hash function
+    use_n_observed: bool,    // Return min(estimate, n_observed)
 
-    pub use_n_observed: bool, // Flag to use n_observed in cardinality estimation
+    _phantom: PhantomData<HASH>, // To keep the type parameter
 }
 
-impl HyperLogLogPlusMinus<fn(u64) -> u64> {
-    /// Constructs a new HyperLogLogPlusMinus with default parameters.
-    pub fn new_default() -> Self {
-        Self::new(12, true, murmurhash3_finalizer)
-    }
-}
+impl HyperLogLogPlusMinus<u64> {
+    /// Constructs a new HyperLogLogPlusMinus with the given precision and optional hash function.
+    pub fn new(precision: u8, sparse: bool, bit_mixer: Option<HashFunction>) -> io::Result<Self> {
+        if precision > 18 || precision < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "precision must be between 4 and 18",
+            ));
+        }
 
-impl<H> HyperLogLogPlusMinus<H>
-where
-    H: Fn(u64) -> u64 + Clone,
-{
-    /// Constructs a new HyperLogLogPlusMinus with given precision, sparse flag, and bit mixer function.
-    /// - `precision`: Determines the number of registers (m = 2^p). Default is 12.
-    /// - `sparse`: Whether to use sparse representation initially. Default is true.
-    /// - `bit_mixer`: Function to mix/hash input values. Default is `murmurhash3_finalizer`.
-    pub fn new(precision: u8, sparse: bool, bit_mixer: H) -> Self {
         let m = 1 << precision;
-        HyperLogLogPlusMinus {
+        let p_prime = 25;
+        let m_prime = 1 << p_prime;
+
+        Ok(Self {
             p: precision,
             m,
-            m_registers: vec![0u8; m],
+            M: if sparse { Vec::new() } else { vec![0; m] },
             n_observed: 0,
             sparse,
-            sparse_list: HashSet::new(),
-            bit_mixer,
-            const_p_prime: 25,      // pPrime = 25
-            const_m_prime: 1 << 25, // mPrime = 2^25
+            sparse_list: SparseListType::new(),
+            p_prime,
+            m_prime,
+            bit_mixer: bit_mixer.unwrap_or(murmurhash3_finalizer),
             use_n_observed: true,
-        }
+            _phantom: PhantomData,
+        })
     }
 
-    /// Clones the HyperLogLogPlusMinus instance.
-    pub fn clone_instance(&self) -> Self {
-        HyperLogLogPlusMinus {
-            p: self.p,
-            m: self.m,
-            m_registers: self.m_registers.clone(),
-            n_observed: self.n_observed,
-            sparse: self.sparse,
-            sparse_list: self.sparse_list.clone(),
-            bit_mixer: self.bit_mixer.clone(),
-            const_p_prime: self.const_p_prime,
-            const_m_prime: self.const_m_prime,
-            use_n_observed: self.use_n_observed,
-        }
-    }
-
-    /// Resets the HyperLogLog to its initial state. Sets sparse=true and clears data.
+    /// Resets the HyperLogLogPlusMinus to its initial state.
     pub fn reset(&mut self) {
-        self.p = self.p;
-        self.m = 1 << self.p;
-        self.m_registers = vec![0u8; self.m];
-        self.n_observed = 0;
         self.sparse = true;
+        self.n_observed = 0;
         self.sparse_list.clear();
+        self.M.clear();
     }
 
-    /// Inserts a single item into the HyperLogLog.
+    /// Inserts an item into the HyperLogLogPlusMinus.
     pub fn insert(&mut self, item: u64) {
         self.n_observed += 1;
+        let hash_value = (self.bit_mixer)(item);
+
+        if self.sparse && self.sparse_list.len() + 1 > self.m / 4 {
+            self.switch_to_normal_representation();
+        }
+
         if self.sparse {
-            // Insert into sparse list
-            let index = (item >> self.const_p_prime) as u32;
-            self.sparse_list.insert(index);
-            // TODO: Implement switch to normal representation if sparse list exceeds threshold
-            // For example, switch when sparse_list.len() > mPrime
-            if self.sparse_list.len() > self.const_m_prime {
-                self.switch_to_normal_representation();
-            }
+            let encoded_hash_value = encode_hash_in_32bit(hash_value, self.p_prime, self.p);
+            self.add_hash_to_sparse_list(encoded_hash_value);
         } else {
-            // Normal representation: update registers
-            let hash = (self.bit_mixer)(item);
-            let (register_index, rank) = self.extract_register_info(hash);
-            if rank > self.m_registers[register_index] {
-                self.m_registers[register_index] = rank;
+            let idx = get_index(hash_value, self.p);
+            let rank = get_rank(hash_value, self.p);
+            if rank > self.M[idx] {
+                self.M[idx] = rank;
             }
         }
     }
 
-    /// Inserts multiple items into the HyperLogLog.
+    /// Inserts a vector of items into the HyperLogLogPlusMinus.
     pub fn insert_multiple(&mut self, items: &[u64]) {
-        self.n_observed += items.len() as u64;
-        if self.sparse {
-            for &item in items {
-                let index = (item >> self.const_p_prime) as u32;
-                self.sparse_list.insert(index);
-                // TODO: Implement switch to normal representation if sparse list exceeds threshold
-                if self.sparse_list.len() > self.const_m_prime {
-                    self.switch_to_normal_representation();
-                    break; // Once switched, continue with normal representation
-                }
-            }
-            if !self.sparse {
-                // If switched to normal representation, insert remaining items normally
-                for &item in items.iter().skip(self.sparse_list.len()) {
-                    let hash = (self.bit_mixer)(item);
-                    let (register_index, rank) = self.extract_register_info(hash);
-                    if rank > self.m_registers[register_index] {
-                        self.m_registers[register_index] = rank;
-                    }
-                }
-            }
-        } else {
-            for &item in items {
-                let hash = (self.bit_mixer)(item);
-                let (register_index, rank) = self.extract_register_info(hash);
-                if rank > self.m_registers[register_index] {
-                    self.m_registers[register_index] = rank;
-                }
-            }
+        for &item in items {
+            self.insert(item);
         }
     }
 
     /// Merges another HyperLogLogPlusMinus into this one.
-    /// Assumes both instances use the same bit mixer.
-    pub fn merge(&mut self, other: &Self) {
-        self.n_observed += other.n_observed;
-        if self.sparse && other.sparse {
-            // Merge sparse lists
-            for index in other.sparse_list.clone() {
-                self.sparse_list.insert(index);
-            }
-            // Check if need to switch to normal representation
-            if self.sparse_list.len() > self.const_m_prime {
-                self.switch_to_normal_representation();
-            }
+    pub fn merge(&mut self, other: &HyperLogLogPlusMinus<u64>) -> io::Result<()> {
+        if self.p != other.p {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "precisions must be equal",
+            ));
+        }
+
+        if other.n_observed == 0 {
+            return Ok(());
+        }
+
+        if self.n_observed == 0 {
+            self.n_observed = other.n_observed;
+            self.sparse = other.sparse;
+            self.sparse_list = other.sparse_list.clone();
+            self.M = other.M.clone();
         } else {
-            if self.sparse {
-                // Convert self to normal representation
-                self.switch_to_normal_representation();
-            }
-            if other.sparse {
-                // Add other's sparse list to self's registers
-                self.add_to_registers(other.sparse_list.clone());
+            self.n_observed += other.n_observed;
+            if self.sparse && other.sparse {
+                self.sparse_list.extend(&other.sparse_list);
+                if self.sparse_list.len() + 1 > self.m / 4 {
+                    self.switch_to_normal_representation();
+                }
+            } else if other.sparse {
+                self.add_to_registers(&other.sparse_list);
             } else {
-                // Merge the registers by taking the maximum value for each register
-                for i in 0..self.m {
-                    if other.m_registers[i] > self.m_registers[i] {
-                        self.m_registers[i] = other.m_registers[i];
+                if self.sparse {
+                    self.switch_to_normal_representation();
+                }
+                for (i, &val) in other.M.iter().enumerate() {
+                    if val > self.M[i] {
+                        self.M[i] = val;
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    /// Implements the `+=` operator for merging.
-    pub fn add_assign(&mut self, other: &Self) {
-        self.merge(other);
-    }
-
-    /// Returns the estimated cardinality using Ertl's estimator.
+    /// Returns the cardinality estimate using Ertl's method.
     pub fn cardinality(&self) -> u64 {
         self.ertl_cardinality()
     }
 
-    /// Alias for `cardinality()`.
-    pub fn size(&self) -> u64 {
-        self.cardinality()
-    }
-
-    /// Heule et al.'s cardinality estimator with optional bias correction.
-    pub fn heule_cardinality(&self, correct_bias: bool) -> u64 {
-        if correct_bias {
-            // Implement bias correction based on empirical data
-            // Placeholder: Using Ertl's estimator
-            self.ertl_cardinality()
-        } else {
-            self.flajolet_cardinality(true)
-        }
-    }
-
-    /// Ertl's improved cardinality estimator without relying on empirical data.
-    pub fn ertl_cardinality(&self) -> u64 {
-        let alpha_m = Self::get_alpha_m(self.m);
-        let mut indicator_sum = 0.0;
-        let mut zero_registers = 0;
-
-        for &register in &self.m_registers {
-            indicator_sum += 2f64.powi(-(register as i32));
-            if register == 0 {
-                zero_registers += 1;
-            }
-        }
-
-        if zero_registers != 0 {
-            // Linear counting
-            (self.m as f64 * ((self.m as f64 / zero_registers as f64).ln())) as u64
-        } else {
-            // Raw HyperLogLog estimate
-            (alpha_m * (self.m as f64).powi(2) / indicator_sum) as u64
-        }
-    }
-
-    /// Flajolet's cardinality estimator without bias correction.
-    pub fn flajolet_cardinality(&self, use_sparse_precision: bool) -> u64 {
-        // Implement Flajolet's estimator
-        // Placeholder: Using Ertl's estimator
-        self.ertl_cardinality()
-    }
-
-    /// Returns the number of observed elements.
+    /// Returns the number of observed items.
     pub fn n_observed(&self) -> u64 {
         self.n_observed
     }
 
-    /// Private helper to switch from sparse to normal representation.
-    fn switch_to_normal_representation(&mut self) {
-        // Take ownership of the sparse_list
-        let sparse_list = std::mem::take(&mut self.sparse_list);
-        // Convert the sparse list to normal representation by updating registers
-        self.add_to_registers(sparse_list);
-        self.sparse = false;
-        // No need to clear sparse_list since we've already taken it
+    /// Returns the estimated size.
+    pub fn size(&self) -> u64 {
+        self.cardinality()
     }
 
-    /// Private helper to add elements from sparse_list to registers.
-    fn add_to_registers(&mut self, sparse_list: SparseListType) {
-        for index in sparse_list {
-            // Reconstruct the original hash value from index.
-            // Note: This is a placeholder implementation.
-            // You'll need to implement the actual logic based on your use case.
-            let hash = index as u64; // Adjust as necessary
+    // Private helper methods
 
-            let (register_index, rank) = self.extract_register_info(hash);
-            if rank > self.m_registers[register_index] {
-                self.m_registers[register_index] = rank;
+    fn switch_to_normal_representation(&mut self) {
+        if !self.sparse {
+            return;
+        }
+        self.sparse = false;
+        self.M = vec![0; self.m];
+        let sparse_list = std::mem::take(&mut self.sparse_list);
+        self.add_to_registers(&sparse_list);
+    }
+
+    fn add_to_registers(&mut self, sparse_list: &SparseListType) {
+        for &encoded_hash_value in sparse_list {
+            let idx = get_index_u32(encoded_hash_value, self.p);
+            let rank_val = get_encoded_rank(encoded_hash_value, self.p_prime, self.p);
+            if rank_val > self.M[idx] {
+                self.M[idx] = rank_val;
             }
         }
     }
 
-    /// Extracts register index and rank from hash.
-    fn extract_register_info(&self, hash: u64) -> (usize, u8) {
-        let register_index = ((hash >> (64 - self.p)) & ((1 << self.p) - 1)) as usize;
-        let remaining_bits = (hash << self.p) | (hash >> (64 - self.p));
-        let rank = Self::leading_zeroes(remaining_bits) + 1;
-        (register_index, rank)
+    fn add_hash_to_sparse_list(&mut self, val: u32) {
+        self.sparse_list.insert(val);
     }
 
-    /// Counts leading zeroes in a u64.
-    fn leading_zeroes(x: u64) -> u8 {
-        if x == 0 {
-            64
+    fn ertl_cardinality(&self) -> u64 {
+        let (q, m, C) = if self.sparse {
+            let q = 64 - self.p_prime;
+            let m = self.m_prime as usize;
+            let C = sparse_register_histogram(&self.sparse_list, self.p_prime, self.p, q);
+            (q, m, C)
         } else {
-            x.leading_zeros() as u8
-        }
-    }
+            let q = 64 - self.p;
+            let m = self.m;
+            let C = register_histogram(&self.M, q);
+            (q, m, C)
+        };
 
-    /// Gets the alpha_m constant based on the number of registers m.
-    fn get_alpha_m(m: usize) -> f64 {
-        match m {
-            16 => 0.673,
-            32 => 0.697,
-            64 => 0.709,
-            _ => 0.7213 / (1.0 + 1.079 / (m as f64)),
+        let mut est_denominator = m as f64 * tau(1.0 - (C[q as usize + 1] as f64) / m as f64);
+        for k in (1..=q).rev() {
+            est_denominator += C[k as usize] as f64;
+            est_denominator *= 0.5;
         }
-    }
-}
+        est_denominator += m as f64 * sigma(C[0] as f64 / m as f64);
+        let m_sq_alpha_inf = (m as f64 / (2.0 * LN_2)) * m as f64;
+        let est = m_sq_alpha_inf / est_denominator;
 
-/// Implement the `Default` trait for HyperLogLogPlusMinus.
-impl<H> Default for HyperLogLogPlusMinus<H>
-where
-    H: Fn(u64) -> u64 + Default,
-{
-    fn default() -> Self {
-        HyperLogLogPlusMinus {
-            p: 12,
-            m: 1 << 12,
-            m_registers: vec![0u8; 1 << 12],
-            n_observed: 0,
-            sparse: true,
-            sparse_list: HashSet::new(),
-            bit_mixer: H::default(),
-            const_p_prime: 25,
-            const_m_prime: 1 << 25,
-            use_n_observed: true,
+        if self.use_n_observed && self.n_observed < est as u64 {
+            self.n_observed
+        } else {
+            est.round() as u64
         }
     }
 }
 
-/// Implement the `Clone` trait for HyperLogLogPlusMinus.
-impl<H> Clone for HyperLogLogPlusMinus<H>
-where
-    H: Fn(u64) -> u64 + Clone,
-{
-    fn clone(&self) -> Self {
-        HyperLogLogPlusMinus {
-            p: self.p,
-            m: self.m,
-            m_registers: self.m_registers.clone(),
-            n_observed: self.n_observed,
-            sparse: self.sparse,
-            sparse_list: self.sparse_list.clone(),
-            bit_mixer: self.bit_mixer.clone(),
-            const_p_prime: self.const_p_prime,
-            const_m_prime: self.const_m_prime,
-            use_n_observed: self.use_n_observed,
-        }
+// Helper functions
+
+/// Counts the number of leading zeros in a u64 value.
+fn clz(x: u64) -> u8 {
+    x.leading_zeros() as u8
+}
+
+/// Gets the index from the hash value.
+fn get_index(hash_value: u64, p: u8) -> usize {
+    (hash_value >> (64 - p)) as usize
+}
+
+/// Gets the index from the encoded hash value (u32).
+fn get_index_u32(hash_value: u32, p: u8) -> usize {
+    (hash_value >> (32 - p)) as usize
+}
+
+/// Gets the rank from the hash value.
+fn get_rank(hash_value: u64, p: u8) -> u8 {
+    let shifted = hash_value << p;
+    let rank = clz(shifted) + 1;
+    rank
+}
+
+/// Gets the encoded rank from the encoded hash value.
+fn get_encoded_rank(encoded_hash_value: u32, p_prime: u8, p: u8) -> u8 {
+    if (encoded_hash_value & 1) == 1 {
+        let additional_rank = p_prime - p;
+        let rank = ((encoded_hash_value >> 1) & 0x3F) as u8; // 6 bits for rank
+        additional_rank + rank
+    } else {
+        get_rank_u32(encoded_hash_value, p)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Gets the rank from a u32 hash value.
+fn get_rank_u32(hash_value: u32, p: u8) -> u8 {
+    let shifted = hash_value << p;
+    let rank = clz(shifted as u64) as u8 - 31 + p;
+    rank
+}
 
-    #[test]
-    fn test_hyperloglogplusminus_basic() {
-        let mut hll = HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer);
-        let items: Vec<u64> = (0..1000).collect();
-        hll.insert_multiple(&items);
-        let estimate = hll.cardinality();
-        println!("Estimated cardinality: {}", estimate);
-        // Since inserting 1000 unique items, the estimate should be close to 1000.
-        assert!((estimate as i64 - 1000).abs() < 100); // Allow some error margin
+/// Encodes the hash value into 32 bits for the sparse representation.
+fn encode_hash_in_32bit(hash_value: u64, p_prime: u8, p: u8) -> u32 {
+    let idx = (hash_value >> (64 - p_prime)) as u32;
+
+    if (idx << p) == 0 {
+        let additional_rank = get_rank(hash_value, p_prime);
+        idx | ((additional_rank as u32) << 1) | 1
+    } else {
+        idx
+    }
+}
+
+/// Computes sigma(x) as per Ertl's method.
+fn sigma(mut x: f64) -> f64 {
+    if x == 1.0 {
+        return f64::INFINITY;
     }
 
-    #[test]
-    fn test_hyperloglogplusminus_merge() {
-        let mut hll1 = HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer);
-        let items1: Vec<u64> = (0..500).collect();
-        hll1.insert_multiple(&items1);
+    let mut prev_sigma_x;
+    let mut sigma_x = x;
+    let mut y = 1.0;
 
-        let mut hll2 = HyperLogLogPlusMinus::new(12, true, murmurhash3_finalizer);
-        let items2: Vec<u64> = (250..750).collect();
-        hll2.insert_multiple(&items2);
-
-        hll1.merge(&hll2);
-        let estimate = hll1.cardinality();
-        println!("Estimated cardinality after merge: {}", estimate);
-        // Unique items from 0..750 => 750
-        assert!((estimate as i64 - 750).abs() < 100); // Allow some error margin
+    loop {
+        prev_sigma_x = sigma_x;
+        x *= x;
+        sigma_x += x * y;
+        y += y;
+        if sigma_x == prev_sigma_x {
+            break;
+        }
     }
+    sigma_x
+}
+
+/// Computes tau(x) as per Ertl's method.
+fn tau(mut x: f64) -> f64 {
+    if x == 0.0 || x == 1.0 {
+        return 0.0;
+    }
+
+    let mut prev_tau_x;
+    let mut tau_x = 1.0 - x;
+    let mut y = 1.0;
+
+    loop {
+        prev_tau_x = tau_x;
+        x = x.sqrt();
+        y /= 2.0;
+        tau_x -= (1.0 - x).powi(2) * y;
+        if tau_x == prev_tau_x {
+            break;
+        }
+    }
+    tau_x / 3.0
+}
+
+/// Generates the register histogram for Ertl's method.
+fn register_histogram(M: &[u8], q: u8) -> Vec<u32> {
+    let mut C = vec![0u32; q as usize + 2];
+    for &val in M {
+        if (val as usize) >= C.len() {
+            continue;
+        }
+        C[val as usize] += 1;
+    }
+    C
+}
+
+/// Generates the sparse register histogram for Ertl's method.
+fn sparse_register_histogram(sparse_list: &SparseListType, p_prime: u8, p: u8, q: u8) -> Vec<u32> {
+    let mut C = vec![0u32; q as usize + 2];
+    let mut m = 1u32 << p_prime;
+    for &encoded_hash_value in sparse_list {
+        let rank_val = get_encoded_rank(encoded_hash_value, p_prime, p);
+        if (rank_val as usize) >= C.len() {
+            continue;
+        }
+        C[rank_val as usize] += 1;
+        m -= 1;
+    }
+    C[0] = m;
+    C
+}
+
+// Hash functions
+
+/// MurmurHash3 finalizer for 64-bit inputs.
+pub fn murmurhash3_finalizer(mut key: u64) -> u64 {
+    key = key.wrapping_add(1);
+    key ^= key >> 33;
+    key = key.wrapping_mul(0xff51afd7ed558ccd);
+    key ^= key >> 33;
+    key = key.wrapping_mul(0xc4ceb9fe1a85ec53);
+    key ^= key >> 33;
+    key
+}
+
+/// Wang's 64-bit hash function.
+pub fn wang_mixer(mut key: u64) -> u64 {
+    key = (!key).wrapping_add(key << 21);
+    key ^= key >> 24;
+    key = (key.wrapping_add(key << 3)).wrapping_add(key << 8);
+    key ^= key >> 14;
+    key = (key.wrapping_add(key << 2)).wrapping_add(key << 4);
+    key ^= key >> 28;
+    key = key.wrapping_add(key << 31);
+    key
 }

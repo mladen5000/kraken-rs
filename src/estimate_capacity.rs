@@ -254,11 +254,12 @@ fn process_sequences(opts: &Options) {
 
 fn process_sequence(seq: &str, opts: &Options, sets: &Arc<Vec<Mutex<HashSet<u64>>>>) {
     let mut scanner = MinimizerScanner::new(
-        opts.k,
-        opts.l,
+        opts.k as isize,
+        opts.l as isize,
         opts.spaced_seed_mask,
         !opts.input_is_protein,
         opts.toggle_mask,
+        1, // Assuming revcom_version is 1
     );
 
     let mut seq = seq.to_string();
