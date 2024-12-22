@@ -23,7 +23,7 @@ const REV_LOOKUP_TABLE: [u8; 256] = {
     table
 };
 
-fn translate_to_all_frames(dna_seq: &str) -> [String; 6] {
+pub fn translate_to_all_frames(dna_seq: &str) -> [String; 6] {
     let max_size = (dna_seq.len() / 3) + 1;
     let mut aa_seqs = [
         Vec::with_capacity(max_size),

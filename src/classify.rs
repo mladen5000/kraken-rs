@@ -96,10 +96,6 @@ struct OutputData {
     unclassified_out2_str: String,
 }
 
-// Placeholder types, assuming these are defined elsewhere
-type TaxonCountsT = HashMap<taxid_t, u32>;
-type TaxonCountersT = HashMap<taxid_t, readcounts::TaxonCount>; // or appropriate struct
-
 struct IndexOptions {
     k: usize,
     l: usize,

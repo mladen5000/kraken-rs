@@ -7,7 +7,6 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::readcounts::HyperLogLogPlusMinus;
 use crate::readcounts::ReadCounts;
 use std::collections::HashMap;
 use std::fs::File;

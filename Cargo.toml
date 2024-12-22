@@ -8,7 +8,7 @@ edition = "2021"
 
 
 [dependencies]
-clap = { version = "4.5.17", features = ["derive"] }
+clap = { version = "4.5.23", features = ["derive"] }
 nix = { version = "0.29.0", features = ["fs"] }
 rayon = "1.5.3"
 num_cpus = "1.16.0"
@@ -16,20 +16,55 @@ atty = "0.2.14"
 getopts = "0.2.21"
 memmap = "0.7.0"
 byteorder = "1.5.0"
-anyhow = "1.0.88"
-libc = "0.2.153"
+anyhow = "1.0.94"
+libc = "0.2.167"
 memmap2 = "0.9.5"
 threadpool = "1.8.1"
-flate2 = "1.0.33"
-serde = { version = "1.0.210", features = ["derive"] }
+flate2 = "1.0.35"
+serde = { version = "1.0.216", features = ["derive"] }
 bincode = "1.3.3"
-serde_json = "1.0.128"
+serde_json = "1.0.134"
 rand = "0.8.5"
-regex = "1.10.6"
+regex = "1.11.1"
 mmap = "0.1.1"
 crossbeam = "0.8.3"
 crossbeam-channel = "0.5.8"
 lazy_static = "1.4.0"
+bytemuck = "1.21.0"
+tokio = { version = "1.42.0", features = ["full"] }
+reqwest = "0.12.9"
+futures = "0.3.31"
+log = "0.4.22"
 
 [features]
+openmp = []
 linear_probing = []
+exact_counting = []
+
+[[bin]]
+name = "mladen"
+path = "src/mladen.rs"
+
+[[bin]]
+name = "build_db"
+path = "src/build_db.rs"
+
+[[bin]]
+name = "classify"
+path = "src/classify.rs"
+
+[[bin]]
+name = "dump_table"
+path = "src/dump_table.rs"
+
+[[bin]]
+name = "estimate_capacity"
+path = "src/estimate_capacity.rs"
+
+[[bin]]
+name = "lookup_accession_numbers"
+path = "src/lookup_accession_numbers.rs"
+
+[[bin]]
+name = "k2mask"
+path = "src/k2mask.rs"

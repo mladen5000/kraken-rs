@@ -5,7 +5,6 @@ pub mod hyperloglogplus;
 
 pub mod kraken2_data;
 pub mod kv_store;
-pub mod mladen;
 pub mod reports;
 pub mod threadpool;
 
@@ -26,8 +25,11 @@ pub mod readcounts;
 // k2mask
 pub mod gz_stream;
 pub mod k2mask;
+/// Main entry point for the k2mask executable.
+///
+/// Prints "Hello, world!" to STDOUT, then runs the k2mask::run() function.
 fn main() {
     println!("Hello, world!");
 
-    k2mask::run();
+    k2mask::main();
 }
