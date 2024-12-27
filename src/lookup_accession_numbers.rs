@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::process::exit;
 
 fn main() {

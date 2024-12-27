@@ -44,24 +44,24 @@
       "./Cargo.toml"
     ],
     "explorerExclude.backup": {
-      "**/.git": true,
-      "**/.svn": true,
-      "**/.hg": true,
-      "**/CVS": true,
-      "**/.DS_Store": true,
-      "**/Thumbs.db": true,
-      "**/.ruby-lsp": true,
-      "**/kraken2": true,
-      "kraken2": true,
-      "**/.plandex": true,
-      ".plandex": true,
-      "**/firedbg": true,
-      "firedbg": true,
-      "**/FreeAskInternet": true,
-      "FreeAskInternet": true,
-      "**/.vscode": true,
-      ".vscode": true
+      "**/.git": false,
+      "**/.svn": false,
+      "**/.hg": false,
+      "**/CVS": false,
+      "**/.DS_Store": false,
+      "**/Thumbs.db": false,
+      "**/.ruby-lsp": false,
+      "**/kraken2": false,
+      "kraken2": false,
+      "**/.plandex": false,
+      ".plandex": false,
+      "**/firedbg": false,
+      "firedbg": false,
+      "**/FreeAskInternet": false,
+      "FreeAskInternet": false,
+      "**/.vscode": false,
+      ".vscode": false
     },
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": false
   }
 }

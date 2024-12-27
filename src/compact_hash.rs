@@ -5,8 +5,8 @@ use std::io::{Read, Write};
 use std::sync::Mutex;
 
 // Type aliases, inferred from code usage:
-type hkey_t = u64;
-type hvalue_t = u64;
+type HkeyT = u64;
+type HvalueT = u64;
 
 // Constants from the code (not given explicitly, we assume from code)
 const LOCK_ZONES: usize = 64; // number of lock zones, arbitrary guess
@@ -28,7 +28,7 @@ impl CompactHashCell {
         CompactHashCell { data: 0 }
     }
 
-    fn value(&self, value_bits: usize) -> hvalue_t {
+    fn value(&self, value_bits: usize) -> HvalueT {
         let mask = (1u64 << value_bits) - 1;
         self.data & mask
     }
@@ -40,7 +40,7 @@ impl CompactHashCell {
     fn populate(
         &mut self,
         compacted_key: u64,
-        new_value: hvalue_t,
+        new_value: HvalueT,
         key_bits: usize,
         value_bits: usize,
     ) {
@@ -64,7 +64,7 @@ pub struct CompactHashTable {
 }
 
 // taxon_counts_t was a map of value -> count
-type taxon_counts_t = HashMap<hvalue_t, u64>;
+type taxon_counts_t = HashMap<HvalueT, u64>;
 
 // Mock MurmurHash3 function. The original code uses MurmurHash3(key) returning u64.
 // Implementing a real MurmurHash3 is possible but omitted here.
@@ -228,7 +228,7 @@ impl CompactHashTable {
         Ok(())
     }
 
-    pub fn get(&self, key: hkey_t) -> hvalue_t {
+    pub fn get(&self, key: hkey_t) -> HvalueT {
         let hc = murmur_hash3(key);
         let compacted_key = hc >> (32 + self.value_bits_);
         let mut idx = (hc % (self.capacity_ as u64)) as usize;
@@ -287,8 +287,8 @@ impl CompactHashTable {
     pub fn compare_and_set(
         &mut self,
         key: hkey_t,
-        new_value: hvalue_t,
-        old_value: &mut hvalue_t,
+        new_value: HvalueT,
+        old_value: &mut HvalueT,
     ) -> bool {
         if self.file_backed_ {
             return false;
@@ -337,8 +337,8 @@ impl CompactHashTable {
         &mut self,
         idx: usize,
         key: hkey_t,
-        new_value: hvalue_t,
-        old_value: &mut hvalue_t,
+        new_value: HvalueT,
+        old_value: &mut HvalueT,
     ) -> bool {
         let hc = murmur_hash3(key);
         let compacted_key = hc >> (32 + self.value_bits_);

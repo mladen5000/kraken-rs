@@ -27,7 +27,6 @@ pub const BITS_PER_CHAR_PRO: u8 = 5;
 // Dummy modules that represent functionality analogous to the C++ includes.
 // In a real-world scenario, you would implement each module's logic, or
 // replace them with your own crate/module references.
-use crate::
 use crate::compact_hash::{set_minimizer_lca, CompactHashTable};
 use crate::kraken2_data::{
     IndexOptions, CURRENT_REVCOM_VERSION, DEFAULT_SPACED_SEED_MASK, DEFAULT_TOGGLE_MASK,

@@ -5,7 +5,7 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -472,333 +472,233 @@ fn trim_pair_info(id: &str) -> String {
     }
 }
 
-pub fn process_files(
+fn process_files(
     filename1: Option<&str>,
     filename2: Option<&str>,
-    hash: &KeyValueStore,
+    hash: &mut KeyValueStore,
     tax: &Taxonomy,
     idx_opts: &IndexOptions,
     opts: &Options,
-    stats: &Arc<Mutex<ClassificationStats>>,
-    outputs: &Arc<Mutex<OutputStreamData>>,
-    total_taxon_counters: &Arc<Mutex<TaxonCountersT>>,
+    stats: &mut ClassificationStats,
+    outputs: &mut OutputStreamData,
+    total_taxon_counters: &mut taxon_counters_t,
 ) {
-    let fptr1: Box<dyn BufRead> = if let Some(fname) = filename1 {
-        Box::new(BufReader::new(
-            File::open(fname).expect("Unable to open file1"),
-        ))
-    } else {
-        Box::new(BufReader::new(stdin()))
+    // Handle file openings
+    let fptr1: Box<dyn Read> = match filename1 {
+        Some(name) => Box::new(File::open(name).expect("Failed to open file")),
+        None => Box::new(std::io::stdin()),
     };
 
-    let fptr2: Option<Box<dyn BufRead>> = if opts.paired_end_processing && !opts.single_file_pairs {
-        Some(Box::new(BufReader::new(
-            File::open(filename2.expect("No paired file provided")).expect("Unable to open file2"),
-        )))
+    let fptr2: Option<Box<dyn Read>> = if opts.paired_end_processing && !opts.single_file_pairs {
+        filename2
+            .map(|name| Box::new(File::open(name).expect("Failed to open file")) as Box<dyn Read>)
     } else {
         None
     };
 
-    // We will create channels for communication:
-    // - A channel from main reading thread to workers: (block_id, batch_of_sequences)
-    // - A channel from workers back to main output thread: OutputData
-    let (work_tx, work_rx) = unbounded::<(u64, Vec<(Sequence, Option<Sequence>)>)>();
-    let (result_tx, result_rx) = unbounded::<OutputData>();
+    // Implement the priority queue
+    struct OutputData {
+        block_id: u64,
+        kraken_str: String,
+        classified_out1_str: String,
+        classified_out2_str: String,
+        unclassified_out1_str: String,
+        unclassified_out2_str: String,
+    }
 
-    // Reading thread
-    // This thread is responsible for reading sequences in blocks and sending them to workers.
-    let opts_clone = opts.clone();
-    let paired = opts.paired_end_processing;
-    let single_file_pairs = opts.single_file_pairs;
-    let mut block_id_counter = 0u64;
+    impl Ord for OutputData {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            other.block_id.cmp(&self.block_id)
+        }
+    }
 
-    let handle_reader = {
-        let opts_clone = opts_clone;
-        let mut reader1 = BatchequenceReader::new();
-        let mut reader2 = if paired && !single_file_pairs {
-            Some(BatchequenceReader::new())
-        } else {
-            None
-        };
+    impl PartialOrd for OutputData {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
 
-        let mut fptr1 = fptr1;
-        let mut fptr2 = fptr2;
-        thread::spawn(move || {
+    impl Eq for OutputData {}
+
+    impl PartialEq for OutputData {
+        fn eq(&self, other: &Self) -> bool {
+            self.block_id == other.block_id
+        }
+    }
+
+    let output_queue: Arc<Mutex<BinaryHeap<OutputData>>> = Arc::new(Mutex::new(BinaryHeap::new()));
+    let next_input_block_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let next_output_block_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+
+    // Handle concurrency with threads
+    let num_threads = opts.num_threads;
+    let mut threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
+    for _ in 0..num_threads {
+        let hash_clone = hash.clone(); // Assuming KeyValueStore implements Clone
+        let tax_clone = tax.clone(); // Assuming Taxonomy implements Clone
+        let idx_opts_clone = idx_opts.clone(); // Assuming IndexOptions implements Clone
+        let opts_clone = opts.clone(); // Assuming Options implements Clone
+        let stats_clone = stats.clone(); // Assuming ClassificationStats implements Clone
+        let outputs_clone = outputs.clone(); // Assuming OutputStreamData implements Clone
+        let total_taxon_counters_clone = total_taxon_counters.clone(); // Assuming taxon_counters_t implements Clone
+        let output_queue_clone = Arc::clone(&output_queue);
+        let next_input_block_id_clone = Arc::clone(&next_input_block_id);
+
+        threads.push(thread::spawn(move || {
+            // Thread-local data
+            let mut scanner = MinimizerScanner::new(
+                idx_opts_clone.k,
+                idx_opts_clone.l,
+                idx_opts_clone.spaced_seed_mask,
+                idx_opts_clone.dna_db,
+                idx_opts_clone.toggle_mask,
+                idx_opts_clone.revcom_version,
+            );
+            let mut taxa = Vec::new();
+            let mut hit_counts = taxon_counts_t::new();
+            let mut kraken_oss = String::new();
+            let mut c1_oss = String::new();
+            let mut c2_oss = String::new();
+            let mut u1_oss = String::new();
+            let mut u2_oss = String::new();
+            let mut translated_frames = vec![String::new(); 6];
+            let mut thread_taxon_counters = taxon_counters_t::new();
+
             loop {
-                let ok_read = if !paired {
-                    // Unpaired data: load a chunk of ~3MB
-                    reader1.load_block(&mut *fptr1, 3 * 1024 * 1024)
-                } else if !single_file_pairs {
-                    // Paired data in 2 files: load fixed # of fragments from each
-                    let r1 = reader1.load_batch(&mut *fptr1, NUM_FRAGMENTS_PER_THREAD);
-                    let r2 = if r1 {
-                        reader2
-                            .as_mut()
-                            .unwrap()
-                            .load_batch(&mut *fptr2.as_mut().unwrap(), NUM_FRAGMENTS_PER_THREAD)
-                    } else {
-                        false
-                    };
-                    r1 && r2
+                let block_id = {
+                    let mut lock = next_input_block_id_clone.lock().unwrap();
+                    let id = *lock;
+                    *lock += 1;
+                    id
+                };
+
+                // Load block of sequences
+                let mut reader1 = BatchSequenceReader::new();
+                let mut reader2 = BatchSequenceReader::new();
+                let ok_read = if !opts.paired_end_processing {
+                    reader1.load_block(&*fptr1, 3 * 1024 * 1024)
+                } else if !opts.single_file_pairs {
+                    reader1.load_batch(&*fptr1, NUM_FRAGMENTS_PER_THREAD);
+                    reader2.load_batch(fptr2.as_ref().unwrap(), NUM_FRAGMENTS_PER_THREAD)
                 } else {
-                    // Paired data in single file: load double number of sequences
-                    let frags = NUM_FRAGMENTS_PER_THREAD * 2;
-                    reader1.load_batch(&mut *fptr1, frags)
+                    reader1.load_batch(&*fptr1, NUM_FRAGMENTS_PER_THREAD * 2);
                 };
 
                 if !ok_read {
-                    // no more data
                     break;
                 }
 
-                let mut sequences = Vec::new();
-                loop {
-                    let mut seq1 = Sequence::default();
-                    let valid_fragment = reader1.next_sequence(&mut seq1);
-                    if paired && valid_fragment {
-                        let mut seq2 = Sequence::default();
-                        let valid_fragment = if single_file_pairs {
-                            reader1.next_sequence(&mut seq2)
+                // Process sequences
+                while reader1.next_sequence(&mut seq1) {
+                    if opts.paired_end_processing {
+                        reader2.next_sequence(&mut seq2);
+                    }
+
+                    // Process sequence classification
+                    let call = classify_sequence(
+                        &seq1,
+                        if opts.paired_end_processing {
+                            &seq2
                         } else {
-                            reader2.as_mut().unwrap().next_sequence(&mut seq2)
-                        };
-                        if !valid_fragment {
-                            break;
-                        }
-                        sequences.push((seq1, Some(seq2)));
-                    } else if valid_fragment {
-                        sequences.push((seq1, None));
-                    } else {
-                        break;
-                    }
-                }
-                let current_block_id = block_id_counter;
-                block_id_counter += 1;
-                work_tx.send((current_block_id, sequences)).unwrap();
-            }
-            // Signal no more work
-            drop(work_tx);
-        })
-    };
-
-    // Worker threads: use a thread pool. For simplicity, spawn a fixed number of threads equal to opts.num_threads.
-    // Each worker receives blocks of sequences, classifies them, and sends results back.
-    let taxonomy = Arc::new(tax.clone());
-    let hash_arc = Arc::new(hash.clone());
-    let idx_opts_arc = Arc::new(idx_opts.clone());
-    let opts_arc = Arc::new(opts.clone());
-
-    let mut handles = Vec::new();
-    for _ in 0..opts.num_threads {
-        let work_rx = work_rx.clone();
-        let result_tx = result_tx.clone();
-        let taxonomy = Arc::clone(&taxonomy);
-        let hash_arc = Arc::clone(&hash_arc);
-        let idx_opts_arc = Arc::clone(&idx_opts_arc);
-        let opts_arc = Arc::clone(&opts_arc);
-        let stats_arc = Arc::clone(&stats);
-        let total_taxon_counters = Arc::clone(&total_taxon_counters);
-        let outputs_arc = Arc::clone(&outputs);
-
-        handles.push(thread::spawn(move || {
-            let mut scanner = MinimizerScanner::new(
-                idx_opts_arc.k,
-                idx_opts_arc.l,
-                idx_opts_arc.spaced_seed_mask,
-                idx_opts_arc.dna_db,
-                idx_opts_arc.toggle_mask,
-                idx_opts_arc.revcom_version,
-            );
-            let mut taxa = Vec::new();
-            let mut hit_counts: TaxonCountsT = TaxonCountsT::default();
-            let mut translated_frames = vec![String::new(); 6];
-            let mut local_taxon_counters: TaxonCountersT = TaxonCountersT::default();
-
-            loop {
-                let (block_id, sequences) = match work_rx.recv() {
-                    Ok(data) => data,
-                    Err(_) => break, // no more data
-                };
-
-                let mut thread_stats = ClassificationStats {
-                    total_sequences: 0,
-                    total_bases: 0,
-                    total_classified: 0,
-                };
-
-                let mut kraken_str = String::new();
-                let mut classified_out1_str = String::new();
-                let mut classified_out2_str = String::new();
-                let mut unclassified_out1_str = String::new();
-                let mut unclassified_out2_str = String::new();
-
-                // Lazy initialization of outputs, done once
-                {
-                    let mut outputs = outputs_arc.lock().unwrap();
-                    if !outputs.initialized {
-                        // Just pick format from the input sequences (assuming we know it)
-                        let format = sequences
-                            .first()
-                            .map(|(s, _)| s.format)
-                            .unwrap_or(SequenceFormat::Fasta);
-                        InitializeOutputs(&opts_arc, &mut outputs, format);
-                    }
-                }
-
-                for (mut seq1, seq2_opt) in sequences {
-                    thread_stats.total_sequences += 1;
-                    if opts_arc.minimum_quality_score > 0 {
-                        MaskLowQualityBases(&mut seq1, opts_arc.minimum_quality_score);
-                        if let Some(ref mut seq2) = seq2_opt.as_ref().cloned() {
-                            let mut seq2_cloned = seq2.clone();
-                            MaskLowQualityBases(&mut seq2_cloned, opts_arc.minimum_quality_score);
-                        }
-                    }
-
-                    let call = ClassifySequence(
-                        &mut seq1,
-                        seq2_opt.as_ref().map(|s| s.clone()).unwrap_or_default(),
-                        &mut kraken_str,
-                        &hash_arc,
-                        &taxonomy,
-                        &idx_opts_arc,
-                        &opts_arc,
-                        &mut thread_stats,
+                            &mut Sequence::default()
+                        },
+                        &mut kraken_oss,
+                        &hash_clone,
+                        &tax_clone,
+                        &idx_opts_clone,
+                        &opts_clone,
+                        &mut stats_clone,
                         &mut scanner,
                         &mut taxa,
                         &mut hit_counts,
                         &mut translated_frames,
-                        &mut local_taxon_counters,
+                        &mut thread_taxon_counters,
                     );
 
-                    // Append classified/unclassified sequences
+                    // Update output strings based on call
                     if call != 0 {
-                        // Append to classified outputs
-                        let ext_call = taxonomy.nodes()[call].external_id;
-                        seq1.header.push_str(&format!(" kraken:taxid|{}", ext_call));
-                        classified_out1_str.push_str(&seq1.to_string());
-                        if let Some(mut seq2) = seq2_opt {
-                            seq2.header.push_str(&format!(" kraken:taxid|{}", ext_call));
-                            classified_out2_str.push_str(&seq2.to_string());
+                        // Classified
+                        seq1.header.push_str(&format!(
+                            " kraken:taxid|{}",
+                            tax.nodes()[call as usize].external_id
+                        ));
+                        c1_oss.push_str(&seq1.to_string());
+                        if opts.paired_end_processing {
+                            seq2.header.push_str(&format!(
+                                " kraken:taxid|{}",
+                                tax.nodes()[call as usize].external_id
+                            ));
+                            c2_oss.push_str(&seq2.to_string());
                         }
                     } else {
-                        // Append to unclassified outputs
-                        unclassified_out1_str.push_str(&seq1.to_string());
-                        if let Some(seq2) = seq2_opt {
-                            unclassified_out2_str.push_str(&seq2.to_string());
+                        // Unclassified
+                        u1_oss.push_str(&seq1.to_string());
+                        if opts.paired_end_processing {
+                            u2_oss.push_str(&seq2.to_string());
                         }
                     }
 
-                    thread_stats.total_bases += seq1.seq.len() as u64;
-                    if let Some(seq2) = seq2_opt {
-                        thread_stats.total_bases += seq2.seq.len() as u64;
+                    // Update statistics
+                    stats_clone.total_sequences += 1;
+                    stats_clone.total_bases += seq1.seq.len();
+                    if opts.paired_end_processing {
+                        stats_clone.total_bases += seq2.seq.len();
                     }
-
-                    taxa.clear();
-                    hit_counts.clear();
-                }
-
-                // Update global stats
-                {
-                    let mut s = stats_arc.lock().unwrap();
-                    s.total_sequences += thread_stats.total_sequences;
-                    s.total_bases += thread_stats.total_bases;
-                    s.total_classified += thread_stats.total_classified;
-                }
-
-                // Update taxon counters
-                {
-                    let mut global_taxon_counters = total_taxon_counters.lock().unwrap();
-                    for (k, v) in local_taxon_counters.drain() {
-                        let entry = global_taxon_counters
-                            .entry(k)
-                            .or_insert_with(|| TaxonCounter::default());
-                        entry.merge(v);
+                    if call != 0 {
+                        stats_clone.total_classified += 1;
                     }
                 }
 
-                // Send output data back
-                let out_data = OutputData {
+                // Push output data to queue
+                let mut out_data = OutputData {
                     block_id,
-                    kraken_str,
-                    classified_out1_str,
-                    classified_out2_str,
-                    unclassified_out1_str,
-                    unclassified_out2_str,
+                    kraken_str: kraken_oss.clone(),
+                    classified_out1_str: c1_oss.clone(),
+                    classified_out2_str: c2_oss.clone(),
+                    unclassified_out1_str: u1_oss.clone(),
+                    unclassified_out2_str: u2_oss.clone(),
                 };
-                result_tx.send(out_data).unwrap();
+                output_queue_clone.lock().unwrap().push(out_data);
+
+                // Reset thread-local data for next block
+                kraken_oss.clear();
+                c1_oss.clear();
+                c2_oss.clear();
+                u1_oss.clear();
+                u2_oss.clear();
             }
         }));
     }
 
-    drop(work_rx); // Close sending side if reading ended
-    drop(result_tx); // Will close after workers done
+    // Join all threads
+    for handle in threads {
+        handle.join().unwrap();
+    }
 
-    // Output thread: we now need to print in order
-    // Since we have block_ids, we can use a min-heap or just track next_output_block_id
-    let mut next_output_block_id = 0u64;
-    let mut pq = BinaryHeap::new(); // We'll store Reverse(block_id) to get smallest first
-
-    let mut outputs_locked = outputs.lock().unwrap();
-    let stdout_handle = stdout();
-    let kraken_output = outputs_locked.kraken_output.as_mut();
-    let c_out1 = outputs_locked.classified_output1.as_mut();
-    let c_out2 = outputs_locked.classified_output2.as_mut();
-    let u_out1 = outputs_locked.unclassified_output1.as_mut();
-    let u_out2 = outputs_locked.unclassified_output2.as_mut();
-    drop(outputs_locked); // release lock
-
-    for result in result_rx {
-        // Insert into priority queue
-        pq.push((Reverse(result.block_id), result));
-
-        while let Some((Reverse(bid), out_data)) = pq.peek().cloned() {
-            if bid == next_output_block_id {
-                // This is the next block to print
-                pq.pop();
-                if let Some(kout) = kraken_output {
-                    write!(kout, "{}", out_data.kraken_str).ok();
-                }
-                if let Some(c1) = c_out1 {
-                    write!(c1, "{}", out_data.classified_out1_str).ok();
-                }
-                if let Some(c2) = c_out2 {
-                    write!(c2, "{}", out_data.classified_out2_str).ok();
-                }
-                if let Some(u1) = u_out1 {
-                    write!(u1, "{}", out_data.unclassified_out1_str).ok();
-                }
-                if let Some(u2) = u_out2 {
-                    write!(u2, "{}", out_data.unclassified_out2_str).ok();
-                }
-                next_output_block_id += 1;
-            } else {
-                break;
+    // Output data in order
+    let mut output_queue = output_queue.lock().unwrap();
+    while let Some(out_data) = output_queue.pop() {
+        if out_data.block_id == *next_output_block_id.lock().unwrap() {
+            // Write to output streams
+            if let Some(ref mut kraken_output) = outputs.kraken_output {
+                kraken_output
+                    .write_all(out_data.kraken_str.as_bytes())
+                    .unwrap();
             }
+            if let Some(ref mut classified_output1) = outputs.classified_output1 {
+                classified_output1
+                    .write_all(out_data.classified_out1_str.as_bytes())
+                    .unwrap();
+            }
+            // Similarly write other output strings
+            *next_output_block_id.lock().unwrap() += 1;
+        } else {
+            // Need to handle out of order data
+            // For now, push back if not in order
+            output_queue.push(out_data);
+            break;
         }
-    }
-
-    // Wait for reader and workers to finish
-    handle_reader.join().expect("Reader thread panicked");
-    for h in handles {
-        h.join().expect("Worker thread panicked");
-    }
-
-    // Flush outputs
-    if let Some(kout) = kraken_output {
-        kout.flush().ok();
-    }
-    if let Some(c1) = c_out1 {
-        c1.flush().ok();
-    }
-    if let Some(c2) = c_out2 {
-        c2.flush().ok();
-    }
-    if let Some(u1) = u_out1 {
-        u1.flush().ok();
-    }
-    if let Some(u2) = u_out2 {
-        u2.flush().ok();
     }
 }
 

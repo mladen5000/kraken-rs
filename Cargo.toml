@@ -40,31 +40,25 @@ log = "0.4.22"
 openmp = []
 linear_probing = []
 exact_counting = []
+# name = "build_db"
+# path = "src/build_db.rs"
 
-[[bin]]
-name = "mladen"
-path = "src/mladen.rs"
+# [[bin]]
+# name = "classify"
+# path = "src/classify.rs"
 
-[[bin]]
-name = "build_db"
-path = "src/build_db.rs"
+# [[bin]]
+# name = "dump_table"
+# path = "src/dump_table.rs"
 
-[[bin]]
-name = "classify"
-path = "src/classify.rs"
+# [[bin]]
+# name = "estimate_capacity"
+# path = "src/estimate_capacity.rs"
 
-[[bin]]
-name = "dump_table"
-path = "src/dump_table.rs"
+# [[bin]]
+# name = "lookup_accession_numbers"
+# path = "src/lookup_accession_numbers.rs"
 
-[[bin]]
-name = "estimate_capacity"
-path = "src/estimate_capacity.rs"
-
-[[bin]]
-name = "lookup_accession_numbers"
-path = "src/lookup_accession_numbers.rs"
-
-[[bin]]
-name = "k2mask"
-path = "src/k2mask.rs"
+# [[bin]]
+# name = "k2mask"
+# path = "src/k2mask.rs"
