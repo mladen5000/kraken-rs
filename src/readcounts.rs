@@ -40,21 +40,26 @@ pub trait KmerContainer: Clone + Default {
     fn insert(&mut self, kmer: u64);
     fn len(&self) -> usize;
     fn merge(&mut self, other: &Self);
+    fn add(&mut self, other: &Self);
 }
 
 // Implementations for HashSet<u64> and HyperLogLogPlusMinus remain the same
 
 impl KmerContainer for HashSet<u64> {
     fn insert(&mut self, kmer: u64) {
-        self.insert(kmer);
+        HashSet::insert(self, kmer);
     }
 
     fn len(&self) -> usize {
-        self.len()
+        HashSet::len(self)
     }
 
     fn merge(&mut self, other: &Self) {
         self.extend(other.iter().cloned());
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.extend(other.iter().copied());
     }
 }
 
@@ -68,6 +73,10 @@ impl KmerContainer for HyperLogLogPlusMinus {
     }
 
     fn merge(&mut self, other: &Self) {
+        self.merge(other);
+    }
+
+    fn add(&mut self, other: &Self) {
         self.merge(other);
     }
 }
@@ -161,6 +170,19 @@ where
     }
 }
 
+impl<T> Ord for ReadCounts<T>
+where
+    T: KmerContainer,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self.n_reads != other.n_reads {
+            self.n_reads.cmp(&other.n_reads)
+        } else {
+            self.n_kmers.cmp(&other.n_kmers)
+        }
+    }
+}
+
 impl<T> AddAssign for ReadCounts<T>
 where
     T: KmerContainer,
@@ -168,7 +190,7 @@ where
     fn add_assign(&mut self, other: Self) {
         self.n_reads += other.n_reads;
         self.n_kmers += other.n_kmers;
-        self.kmers.merge(&other.kmers);
+        self.kmers.add(&other.kmers);
     }
 }
 

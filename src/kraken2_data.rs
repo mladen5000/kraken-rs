@@ -7,7 +7,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::readcounts::ReadCounts;
+use crate::hyperloglogplus::HyperLogLogPlusMinus;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
@@ -38,13 +38,61 @@ impl IndexOptions {
 pub type TaxId = u64;
 pub const TAXID_MAX: TaxId = u64::MAX;
 
+// Unified TaxonCounters struct that matches C++ implementation
+#[derive(Clone)]
+pub struct TaxonCounters {
+    pub read_count: u64,
+    pub kmer_count: HyperLogLogPlusMinus,
+}
+
+impl TaxonCounters {
+    pub fn new(read_count: u64, kmer_count: HyperLogLogPlusMinus) -> Self {
+        Self {
+            read_count,
+            kmer_count,
+        }
+    }
+
+    pub fn new_with_precision(precision: u8) -> Self {
+        let kmer_count = HyperLogLogPlusMinus::new(precision, true, crate::utilities::murmur_hash3);
+        Self {
+            read_count: 0,
+            kmer_count,
+        }
+    }
+
+    pub fn increment_read_count(&mut self) {
+        self.read_count += 1;
+    }
+
+    pub fn get_read_count(&self) -> u64 {
+        self.read_count
+    }
+
+    pub fn get_kmer_distinct(&self) -> f64 {
+        self.kmer_count.cardinality() as f64
+    }
+
+    pub fn add_kmer(&mut self, kmer: u64) {
+        self.kmer_count.insert(kmer);
+    }
+
+    pub fn merge(&mut self, other: &TaxonCounters) {
+        self.read_count += other.read_count;
+        self.kmer_count.merge_copy(&other.kmer_count);
+    }
+}
+
+impl std::ops::AddAssign for TaxonCounters {
+    fn add_assign(&mut self, other: Self) {
+        self.read_count += other.read_count;
+        self.kmer_count.merge_move(other.kmer_count);
+    }
+}
+
 pub type TaxonCounts = HashMap<TaxId, u64>;
+pub type TaxonCountersMap = HashMap<TaxId, TaxonCounters>;
+pub type TaxonCountsMap = HashMap<TaxId, u32>;
 
-// Conditional compilation based on the `exact_counting` feature
-#[cfg(feature = "exact_counting")]
-pub type ReadCounter = ReadCounts<HashSet<u64>>;
-
-#[cfg(not(feature = "exact_counting"))]
-pub type ReadCounter = ReadCounts<HyperLogLogPlusMinus>;
-
-pub type TaxonCounters = HashMap<TaxId, ReadCounter>;
+pub const BITS_PER_CHAR_DNA: u8 = 2;
+pub const BITS_PER_CHAR_PRO: u8 = 5;

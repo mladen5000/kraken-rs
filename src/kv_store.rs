@@ -4,13 +4,12 @@
  * This file is part of the Kraken 2 taxonomic sequence classification system.
  */
 
-
 pub type HKey = u64;
 pub type HValue = u32;
 
 /// A trait representing a key-value store with 64-bit keys and 32-bit values.
 pub trait KeyValueStore {
-    fn get(&self, key: HKey) -> HValue;
+    fn get(&self, key: u64) -> u64;
 }
 
 /// Implementation of the MurmurHash3 64-bit hash function.

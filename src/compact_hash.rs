@@ -1,388 +1,137 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::fs::File;
+use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-// Type aliases, inferred from code usage:
-type HkeyT = u64;
-type HvalueT = u64;
-
-// Constants from the code (not given explicitly, we assume from code)
-const LOCK_ZONES: usize = 64; // number of lock zones, arbitrary guess
-                              // If code used #ifdef LINEAR_PROBING, we can define a feature to toggle.
-#[cfg(feature = "linear_probing")]
-const LINEAR_PROBING: bool = true;
-#[cfg(not(feature = "linear_probing"))]
-const LINEAR_PROBING: bool = false;
-
-// A compact hash cell stores key and value in a single u64.
-// The value occupies the lower `value_bits` bits, the key occupies the upper `key_bits` bits.
-#[derive(Copy, Clone)]
-struct CompactHashCell {
-    data: u64,
-}
-
-impl CompactHashCell {
-    fn new() -> Self {
-        CompactHashCell { data: 0 }
-    }
-
-    fn value(&self, value_bits: usize) -> HvalueT {
-        let mask = (1u64 << value_bits) - 1;
-        self.data & mask
-    }
-
-    fn hashed_key(&self, value_bits: usize) -> u64 {
-        self.data >> value_bits
-    }
-
-    fn populate(
-        &mut self,
-        compacted_key: u64,
-        new_value: HvalueT,
-        key_bits: usize,
-        value_bits: usize,
-    ) {
-        // data = (compacted_key << value_bits) | new_value
-        self.data = (compacted_key << value_bits) | (new_value & ((1 << value_bits) - 1));
-    }
-}
+use crate::kv_store::KeyValueStore;
 
 pub struct CompactHashTable {
-    capacity_: usize,
-    size_: usize,
-    key_bits_: usize,
-    value_bits_: usize,
-    file_backed_: bool,
-    locks_initialized_: bool,
-    table_: *mut CompactHashCell,
-    zone_locks_: Vec<Mutex<()>>,
-    // If memory mapping is desired, store file and mapped memory here.
-    // For now, we emulate with normal load/store.
-    backing_data_: Vec<CompactHashCell>,
-}
-
-// taxon_counts_t was a map of value -> count
-type taxon_counts_t = HashMap<HvalueT, u64>;
-
-// Mock MurmurHash3 function. The original code uses MurmurHash3(key) returning u64.
-// Implementing a real MurmurHash3 is possible but omitted here.
-fn murmur_hash3(key: u64) -> u64 {
-    // A placeholder hash. In production, implement properly.
-    // For stable hashing, consider a standard hash function.
-    // But to mimic original code, just do something simple:
-    // Minimal stand-in:
-    let mut h = key;
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xc4ceb9fe1a85ec53);
-    h ^= h >> 33;
-    h
+    table: Box<[AtomicU64]>,
+    value_bits: u8,
+    taxid_bits: u8,
+    value_mask: u64,
+    taxid_mask: u64,
 }
 
 impl CompactHashTable {
-    pub fn new(capacity: usize, key_bits: usize, value_bits: usize) -> Result<Self> {
-        if key_bits + value_bits != std::mem::size_of::<CompactHashCell>() * 8 {
-            bail!("sum of key bits and value bits must equal 64");
-        }
-        if key_bits == 0 || value_bits == 0 {
-            bail!("key_bits and value_bits cannot be zero");
-        }
+    pub fn new(capacity: usize, value_bits: u8, taxid_bits: u8) -> Self {
+        let table = (0..capacity)
+            .map(|_| AtomicU64::new(0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
-        let mut zone_locks_ = Vec::with_capacity(LOCK_ZONES);
-        for _ in 0..LOCK_ZONES {
-            zone_locks_.push(Mutex::new(()));
-        }
+        let value_mask = (1 << value_bits) - 1;
+        let taxid_mask = (1 << taxid_bits) - 1;
 
-        let mut backing_data_ = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            backing_data_.push(CompactHashCell::new());
-        }
-
-        let table_ptr = backing_data_.as_mut_ptr();
-
-        Ok(CompactHashTable {
-            capacity_: capacity,
-            size_: 0,
-            key_bits_: key_bits,
-            value_bits_: value_bits,
-            file_backed_: false,
-            locks_initialized_: true,
-            table_: table_ptr,
-            zone_locks_,
-            backing_data_,
-        })
-    }
-
-    pub fn from_file(filename: &str, memory_mapping: bool) -> Result<Self> {
-        if memory_mapping {
-            // Memory mapping not implemented
-            bail!("memory mapping not implemented");
-        } else {
-            let mut f = File::open(filename)?;
-            let mut capacity = 0usize;
-            let mut size = 0usize;
-            let mut key_bits = 0usize;
-            let mut value_bits = 0usize;
-
-            unsafe {
-                let buf = std::slice::from_raw_parts_mut(
-                    &mut capacity as *mut usize as *mut u8,
-                    std::mem::size_of::<usize>(),
-                );
-                f.read_exact(buf)?;
-            }
-
-            unsafe {
-                let buf = std::slice::from_raw_parts_mut(
-                    &mut size as *mut usize as *mut u8,
-                    std::mem::size_of::<usize>(),
-                );
-                f.read_exact(buf)?;
-            }
-
-            unsafe {
-                let buf = std::slice::from_raw_parts_mut(
-                    &mut key_bits as *mut usize as *mut u8,
-                    std::mem::size_of::<usize>(),
-                );
-                f.read_exact(buf)?;
-            }
-
-            unsafe {
-                let buf = std::slice::from_raw_parts_mut(
-                    &mut value_bits as *mut usize as *mut u8,
-                    std::mem::size_of::<usize>(),
-                );
-                f.read_exact(buf)?;
-            }
-
-            let mut backing_data_ = vec![CompactHashCell::new(); capacity];
-            unsafe {
-                let bytes_needed = capacity * std::mem::size_of::<CompactHashCell>();
-                let buf = std::slice::from_raw_parts_mut(
-                    backing_data_.as_mut_ptr() as *mut u8,
-                    bytes_needed,
-                );
-                f.read_exact(buf)?;
-            }
-
-            let mut zone_locks_ = Vec::with_capacity(LOCK_ZONES);
-            for _ in 0..LOCK_ZONES {
-                zone_locks_.push(Mutex::new(()));
-            }
-
-            let table_ptr = backing_data_.as_mut_ptr();
-            Ok(CompactHashTable {
-                capacity_: capacity,
-                size_: size,
-                key_bits_: key_bits,
-                value_bits_: value_bits,
-                file_backed_: false,
-                locks_initialized_: true,
-                table_: table_ptr,
-                zone_locks_,
-                backing_data_,
-            })
+        Self {
+            table,
+            value_bits,
+            taxid_bits,
+            value_mask,
+            taxid_mask,
         }
     }
 
-    pub fn write_table(&self, filename: &str) -> Result<()> {
-        let mut ofs = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(filename)?;
-        unsafe {
-            let buf_cap = std::slice::from_raw_parts(
-                &self.capacity_ as *const usize as *const u8,
-                std::mem::size_of::<usize>(),
-            );
-            ofs.write_all(buf_cap)?;
-
-            let buf_size = std::slice::from_raw_parts(
-                &self.size_ as *const usize as *const u8,
-                std::mem::size_of::<usize>(),
-            );
-            ofs.write_all(buf_size)?;
-
-            let buf_kb = std::slice::from_raw_parts(
-                &self.key_bits_ as *const usize as *const u8,
-                std::mem::size_of::<usize>(),
-            );
-            ofs.write_all(buf_kb)?;
-
-            let buf_vb = std::slice::from_raw_parts(
-                &self.value_bits_ as *const usize as *const u8,
-                std::mem::size_of::<usize>(),
-            );
-            ofs.write_all(buf_vb)?;
-
-            let bytes_needed = self.capacity_ * std::mem::size_of::<CompactHashCell>();
-            let table_bytes =
-                std::slice::from_raw_parts(self.backing_data_.as_ptr() as *const u8, bytes_needed);
-            ofs.write_all(table_bytes)?;
+    pub fn write_table(&self, path: &str) -> Result<()> {
+        let mut file = File::create(path)?;
+        for value in self.table.iter() {
+            file.write_all(&value.load(Ordering::Relaxed).to_le_bytes())?;
         }
         Ok(())
     }
 
-    pub fn get(&self, key: hkey_t) -> HvalueT {
-        let hc = murmur_hash3(key);
-        let compacted_key = hc >> (32 + self.value_bits_);
-        let mut idx = (hc % (self.capacity_ as u64)) as usize;
-        let first_idx = idx;
-        let mut step = 0;
-
-        // let table = unsafe { std::slice::from_raw_parts(self.table_, self.capacity_) };
-        let table = &self.backing_data_; // Use backing_data_ directly instead of unsafe pointers
-
-        loop {
-            let val = table[idx].value(self.value_bits_);
-            if val == 0 {
-                break; // empty cell
-            }
-            if table[idx].hashed_key(self.value_bits_) == compacted_key {
-                return val;
-            }
-            if step == 0 {
-                step = self.second_hash(hc);
-            }
-            idx = (idx + step) % self.capacity_;
-            if idx == first_idx {
-                break;
-            }
-        }
-        0
+    pub fn node_count(&self) -> usize {
+        self.table.len()
     }
 
-    pub fn find_index(&self, key: hkey_t, idx_out: &mut usize) -> bool {
-        let hc = murmur_hash3(key);
-        let compacted_key = hc >> (32 + self.value_bits_);
-        *idx_out = (hc % (self.capacity_ as u64)) as usize;
-        let first_idx = *idx_out;
-        let mut step = 0;
-
-        let table = unsafe { std::slice::from_raw_parts(self.table_, self.capacity_) };
-        loop {
-            let val = table[*idx_out].value(self.value_bits_);
-            if val == 0 {
-                return false; // empty cell
-            }
-            if table[*idx_out].hashed_key(self.value_bits_) == compacted_key {
-                return true;
-            }
-            if step == 0 {
-                step = self.second_hash(hc);
-            }
-            *idx_out = (*idx_out + step) % self.capacity_;
-            if *idx_out == first_idx {
-                break;
-            }
-        }
-        false
+    pub fn get_at(&self, idx: usize) -> &AtomicU64 {
+        &self.table[idx]
     }
 
-    pub fn compare_and_set(
-        &mut self,
-        key: hkey_t,
-        new_value: HvalueT,
-        old_value: &mut HvalueT,
-    ) -> bool {
-        if self.file_backed_ {
-            return false;
-        }
-        if new_value == 0 {
-            return false;
-        }
-
-        let hc = murmur_hash3(key);
-        let compacted_key = hc >> (32 + self.value_bits_);
-        let mut idx = (hc % (self.capacity_ as u64)) as usize;
-        let first_idx = idx;
-        let mut step = 0;
-        let table = unsafe { std::slice::from_raw_parts_mut(self.table_, self.capacity_) };
-
-        loop {
-            let zone = idx % LOCK_ZONES;
-            let _guard = self.zone_locks_[zone].lock().unwrap();
-            let cell_val = table[idx].value(self.value_bits_);
-            let cell_key = table[idx].hashed_key(self.value_bits_);
-            if cell_val == 0 || cell_key == compacted_key {
-                // location found
-                if *old_value == cell_val {
-                    table[idx].populate(compacted_key, new_value, self.key_bits_, self.value_bits_);
-                    if *old_value == 0 {
-                        self.size_ += 1;
-                    }
-                    return true;
-                } else {
-                    *old_value = cell_val;
-                    return false;
-                }
-            }
-            drop(_guard);
-            if step == 0 {
-                step = self.second_hash(hc);
-            }
-            idx = (idx + step) % self.capacity_;
-            if idx == first_idx {
-                return false;
-            }
-        }
+    pub fn find_index(&self, key: u64, idx: &mut usize) -> bool {
+        let probe_idx = (key & (self.table.len() as u64 - 1)) as usize;
+        *idx = probe_idx;
+        let value = self.table[probe_idx].load(Ordering::Relaxed);
+        let stored_key = (value >> (self.value_bits + self.taxid_bits)) & self.value_mask;
+        stored_key == key
     }
 
-    pub fn direct_compare_and_set(
-        &mut self,
-        idx: usize,
-        key: hkey_t,
-        new_value: HvalueT,
-        old_value: &mut HvalueT,
-    ) -> bool {
-        let hc = murmur_hash3(key);
-        let compacted_key = hc >> (32 + self.value_bits_);
-        let zone = idx % LOCK_ZONES;
-        let table = unsafe { std::slice::from_raw_parts_mut(self.table_, self.capacity_) };
-        let _guard = self.zone_locks_[zone].lock().unwrap();
-        let cell_val = table[idx].value(self.value_bits_);
-        if *old_value == cell_val {
-            table[idx].populate(compacted_key, new_value, self.key_bits_, self.value_bits_);
-            if *old_value == 0 {
-                self.size_ += 1;
-            }
+    pub fn compare_and_set(&mut self, key: u64, new_value: u64, old_value: &mut u64) -> bool {
+        let probe_idx = (key & (self.table.len() as u64 - 1)) as usize;
+        let current = self.table[probe_idx].load(Ordering::Relaxed);
+        let stored_key = (current >> (self.value_bits + self.taxid_bits)) & self.value_mask;
+
+        if stored_key == 0 {
+            // Empty slot - we can insert
+            *old_value = 0;
+            let new_packed =
+                (key << (self.value_bits + self.taxid_bits)) | (new_value & self.taxid_mask);
+
+            self.table[probe_idx].store(new_packed, Ordering::Relaxed);
             true
+        } else if stored_key == key {
+            // Found existing key
+            *old_value = current & self.taxid_mask;
+            false
         } else {
-            *old_value = cell_val;
+            // Different key in this slot
+            *old_value = 0;
             false
         }
     }
 
-    fn second_hash(&self, first_hash: u64) -> usize {
-        if LINEAR_PROBING {
-            1
-        } else {
-            ((first_hash >> 8) | 1) as usize
-        }
-    }
-
-    pub fn get_value_counts(&self) -> taxon_counts_t {
-        let table = unsafe { std::slice::from_raw_parts(self.table_, self.capacity_) };
-        let mut value_counts = HashMap::new();
-        for i in 0..self.capacity_ {
-            let val = table[i].value(self.value_bits_);
-            if val != 0 {
-                *value_counts.entry(val).or_insert(0) += 1;
+    pub fn set_minimizer_lca(
+        &mut self,
+        key: u64,
+        taxid: u64,
+        taxonomy: &crate::taxonomy::Taxonomy,
+    ) {
+        let mut old_value = 0;
+        let mut new_value = taxid;
+        while !self.compare_and_set(key, new_value, &mut old_value) {
+            if old_value == 0 {
+                // Means there was a different key in the slot
+                break;
             }
+            new_value = taxonomy.lowest_common_ancestor(old_value, taxid);
         }
-        value_counts
     }
 
     pub fn size(&self) -> usize {
-        self.size_
+        let mut count = 0;
+        for value in self.table.iter() {
+            if value.load(Ordering::Relaxed) != 0 {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn capacity(&self) -> usize {
-        self.capacity_
+        self.table.len()
+    }
+
+    pub fn get_value_counts(&self) -> HashMap<u64, u64> {
+        let mut counts = HashMap::new();
+        for value in self.table.iter() {
+            let packed = value.load(Ordering::Relaxed);
+            if packed != 0 {
+                let taxid = packed & self.taxid_mask;
+                *counts.entry(taxid).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+}
+
+impl KeyValueStore for CompactHashTable {
+    fn get(&self, key: u64) -> u64 {
+        let mut idx = 0;
+        if self.find_index(key, &mut idx) {
+            self.table[idx].load(Ordering::Relaxed) & self.taxid_mask
+        } else {
+            0
+        }
     }
 }

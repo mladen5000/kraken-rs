@@ -7,50 +7,34 @@ static TRANSLATION_MAP: &str = "KKNNRRSSTTTTIMIIEEDDGGGGAAAAVVVVQQHHRRRRPPPPLLLL
 
 /// Lazy-initialized lookup table for the **forward** strand.
 /// Maps ASCII 'A', 'G', 'C', 'T' (uppercase or lowercase) to 0..3 in an AGCT order.
-/// All other bytes map to `u8::MAX` to indicate “ambiguous.”
+/// All other bytes map to `u8::MAX` to indicate "ambiguous."
 static FWD_LOOKUP_TABLE: OnceLock<[u8; 256]> = OnceLock::new();
 
-/// Lazy-initialized lookup table for the **reverse** strand.
-/// Maps 'A', 'G', 'C', 'T' to 0..3 in reverse-complement style, shifted to upper bits.
-static REV_LOOKUP_TABLE: OnceLock<[u8; 256]> = OnceLock::new();
-
-/// Initialize the forward and reverse lookup tables on first use.
-fn init_lookup_tables() {
+/// Initialize the forward lookup table on first use.
+fn init_lookup_table() {
     // If already initialized, return.
-    if FWD_LOOKUP_TABLE.get().is_some() && REV_LOOKUP_TABLE.get().is_some() {
+    if FWD_LOOKUP_TABLE.get().is_some() {
         return;
     }
 
     let mut fwd_table = [u8::MAX; 256];
-    let mut rev_table = [u8::MAX; 256];
 
     // 'A' (or 'a') -> 0, 'G' -> 1, 'C' -> 2, 'T' -> 3 in forward
-    // Reverse complement is in the top nibble, so we shift accordingly:
-    //   'A' -> 0x30, 'G' -> 0x20, 'C' -> 0x10, 'T' -> 0x00 for reverse
     for &base in b"AGCTagct" {
-        let code_forward = match base.to_ascii_uppercase() {
+        let code = match base.to_ascii_uppercase() {
             b'A' => 0,
             b'G' => 1,
             b'C' => 2,
             b'T' => 3,
             _ => u8::MAX,
         };
-        let code_reverse = match base.to_ascii_uppercase() {
-            b'A' => 0x30,
-            b'G' => 0x20,
-            b'C' => 0x10,
-            b'T' => 0x00,
-            _ => u8::MAX,
-        };
-        fwd_table[base as usize] = code_forward;
-        rev_table[base as usize] = code_reverse;
+        fwd_table[base as usize] = code;
     }
 
     let _ = FWD_LOOKUP_TABLE.set(fwd_table);
-    let _ = REV_LOOKUP_TABLE.set(rev_table);
 }
 
-/// Translate a single codon (0..63) using `TRANSLATION_MAP` or returns `'X'` if ambiguous.
+/// Translate a single codon (packed into a u8) into an amino acid char.
 #[inline]
 fn translate_codon(codon: u8, is_ambiguous: bool) -> char {
     if is_ambiguous {
@@ -74,98 +58,55 @@ fn translate_codon(codon: u8, is_ambiguous: bool) -> char {
 /// # Returns
 /// An array of 6 amino-acid sequences (forward frames 0..2, reverse frames 3..5).
 ///
-pub fn translate_to_all_frames(dna_seq: &str) -> [String; 6] {
-    init_lookup_tables();
-    let fwd_table = FWD_LOOKUP_TABLE.get().unwrap();
-    let rev_table = REV_LOOKUP_TABLE.get().unwrap();
-
-    // We allocate 6 frames; they might not all be full, so we'll collect them in vectors of chars.
-    // We'll finalize them as Strings at the end.
-    let mut aa_frames = [
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    ];
-
-    // If the sequence is shorter than 3, all frames remain empty.
-    if dna_seq.len() < 3 {
-        return [
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        ];
+pub fn translate_to_all_frames(seq: &str) -> Vec<String> {
+    let mut frames = vec![String::new(); 6];
+    // Forward frames
+    for frame in 0..3 {
+        translate_frame(seq, frame, &mut frames[frame]);
     }
 
-    // We'll track the forward codon bits (0..63) and reverse codon bits (0..63).
-    let mut fwd_codon: u8 = 0;
-    let mut rev_codon: u8 = 0;
-
-    // If ambig_nt_countdown > 0, we are in a window of 3 bases that has at least one ambiguous char.
-    let mut ambig_nt_countdown: u8 = 0;
-
-    for (i, &nt) in dna_seq.as_bytes().iter().enumerate() {
-        let frame = i % 3;
-
-        // Shift forward codon left by 2 bits, keeping only lower 6 bits
-        fwd_codon = (fwd_codon << 2) & 0x3F;
-        // Shift reverse codon right by 2 bits, discarding lower bits
-        rev_codon >>= 2;
-
-        // Decrease ambiguous countdown if active
-        if ambig_nt_countdown > 0 {
-            ambig_nt_countdown -= 1;
-        }
-
-        // Lookup forward and reverse codes
-        let fwd_lookup_code = fwd_table[nt as usize];
-        let rev_lookup_code = rev_table[nt as usize];
-
-        if fwd_lookup_code == u8::MAX {
-            // Mark 3 bases as ambiguous
-            ambig_nt_countdown = 3;
-        } else {
-            fwd_codon |= fwd_lookup_code;
-            rev_codon |= rev_lookup_code;
-        }
-
-        // Once we have read at least 3 bases, we have a full codon
-        if i >= 2 {
-            // Translate forward codon
-            let ch_fwd = translate_codon(fwd_codon, ambig_nt_countdown > 0);
-            aa_frames[frame].push(ch_fwd);
-
-            // Translate reverse codon
-            let ch_rev = translate_codon(rev_codon, ambig_nt_countdown > 0);
-            // The original code prepends the amino acid (building from the end),
-            // but we can build from the front and reverse later
-            aa_frames[frame + 3].push(ch_rev);
-        }
+    // Reverse frames
+    let rev_seq = reverse_complement(seq);
+    for frame in 0..3 {
+        translate_frame(&rev_seq, frame, &mut frames[frame + 3]);
     }
+    frames
+}
 
-    // Now, we need to reverse the 3 reverse-frame strings because in the C++ code,
-    // they were filled from the “end” backwards.
-    for frame in 3..6 {
-        aa_frames[frame].reverse();
+fn translate_frame(seq: &str, frame: usize, output: &mut String) {
+    init_lookup_table(); // Make sure lookup table is initialized
+    let bases = seq.as_bytes();
+    let mut i = frame;
+    while i + 2 < bases.len() {
+        let codon = &bases[i..i + 3];
+        let is_ambiguous = codon
+            .iter()
+            .any(|&b| !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'));
+        let packed = pack_codon(codon);
+        output.push(translate_codon(packed, is_ambiguous));
+        i += 3;
     }
+}
 
-    // Convert from Vec<char> to String
-    let mut result = [
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    ];
-    for (i, frame_vec) in aa_frames.into_iter().enumerate() {
-        result[i] = frame_vec.into_iter().collect();
+fn pack_codon(codon: &[u8]) -> u8 {
+    let mut packed = 0u8;
+    let lookup = FWD_LOOKUP_TABLE.get().unwrap();
+    for (i, &base) in codon.iter().enumerate() {
+        let code = lookup[base as usize];
+        packed |= code << (2 * (2 - i));
     }
+    packed
+}
 
-    result
+fn reverse_complement(seq: &str) -> String {
+    seq.chars()
+        .rev()
+        .map(|c| match c {
+            'A' | 'a' => 'T',
+            'T' | 't' => 'A',
+            'G' | 'g' => 'C',
+            'C' | 'c' => 'G',
+            _ => 'N',
+        })
+        .collect()
 }

@@ -5,27 +5,24 @@
  */
 
 use std::collections::HashMap;
-use std::env;
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Read, Write};
-use std::process;
+use std::fs::File;
+use std::io::{self, Read};
 
-use clap::{App, Arg};
+use anyhow::Result;
+use bincode;
+use clap::{Arg, Command};
+use rayon;
 
-mod compact_hash;
-mod kraken2_data;
-mod kraken2_headers;
-mod mmscanner;
-mod reports;
-mod taxonomy;
-mod utilities;
+use crate::compact_hash::CompactHashTable;
+use crate::kraken2_data::{IndexOptions, TaxId, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO};
+use crate::readcounts::{HyperLogLogPlusMinus, ReadCounts};
+use crate::reports::{report_kraken_style, report_mpa_style};
+use crate::taxonomy::Taxonomy;
 
-use compact_hash::CompactHashTable;
-use kraken2_data::*;
-use kraken2_headers::*;
-use reports::{report_kraken_style, report_mpa_style};
-use taxonomy::Taxonomy;
-use utilities::*;
+const CURRENT_REVCOM_VERSION: u32 = 1;
+const DEFAULT_BITS_FOR_TAXID: u8 = 32;
+
+type TaxidCounters = HashMap<TaxId, ReadCounts<HyperLogLogPlusMinus>>;
 
 #[derive(Debug)]
 struct Options {
@@ -39,12 +36,12 @@ struct Options {
     num_threads: usize,
 }
 
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
     let mut opts = Options {
         hashtable_filename: String::new(),
         taxonomy_filename: String::new(),
         options_filename: String::new(),
-        output_filename: "/dev/stdout".to_string(),
+        output_filename: "/dev/fd/1".to_string(), // Changed to match C++ default
         use_mpa_style: false,
         report_zeros: false,
         skip_counts: false,
@@ -58,10 +55,29 @@ fn main() -> io::Result<()> {
         .build_global()
         .unwrap();
 
-    let kraken_index = CompactHashTable::new_from_file(&opts.hashtable_filename)?;
-    let taxonomy = Taxonomy::new(&opts.taxonomy_filename, false)?;
-
+    // Read the index options first to get value and taxid bits
     let idx_opts = read_index_options(&opts.options_filename)?;
+
+    // Create and load the hash table
+    let mut file = File::open(&opts.hashtable_filename)?;
+    let metadata = file.metadata()?;
+    let capacity = metadata.len() as usize / std::mem::size_of::<u64>();
+
+    let bits_for_taxid = DEFAULT_BITS_FOR_TAXID;
+    let value_bits = (32 - bits_for_taxid) as u8;
+    let kraken_index = CompactHashTable::new(capacity, value_bits, bits_for_taxid);
+
+    let mut buffer = vec![0u64; capacity];
+    file.read_exact(unsafe {
+        std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, capacity * 8)
+    })?;
+    for (i, &value) in buffer.iter().enumerate() {
+        kraken_index
+            .get_at(i)
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let taxonomy = Taxonomy::new(&opts.taxonomy_filename, false)?;
 
     println!(
         "# Database options: {} db, k = {}, l = {}",
@@ -78,11 +94,11 @@ fn main() -> io::Result<()> {
         mask_to_str(
             idx_opts.spaced_seed_mask,
             idx_opts.l as usize
-                * if idx_opts.dna_db {
-                    BITS_PER_CHAR_DNA
+                * (if idx_opts.dna_db {
+                    BITS_PER_CHAR_DNA as usize
                 } else {
-                    BITS_PER_CHAR_PRO
-                }
+                    BITS_PER_CHAR_PRO as usize
+                })
         )
     );
     println!("# Toggle mask = {}", mask_to_str(idx_opts.toggle_mask, 64));
@@ -101,9 +117,9 @@ fn main() -> io::Result<()> {
         let taxid_counts = kraken_index.get_value_counts();
         let total_seqs: u64 = taxid_counts.values().sum();
 
-        let taxid_counters: HashMap<TaxId, ReadCounter> = taxid_counts
+        let taxid_counters: TaxidCounters = taxid_counts
             .iter()
-            .map(|(&taxid, &count)| (taxid, ReadCounter { count, paired: 0 }))
+            .map(|(&taxid, &count)| (taxid, ReadCounts::with_counts(count, count)))
             .collect();
 
         if opts.use_mpa_style {
@@ -112,7 +128,8 @@ fn main() -> io::Result<()> {
                 opts.report_zeros,
                 &taxonomy,
                 &taxid_counters,
-            )?;
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to generate MPA report: {}", e))?;
         } else {
             report_kraken_style(
                 &opts.output_filename,
@@ -122,7 +139,8 @@ fn main() -> io::Result<()> {
                 &taxid_counters,
                 total_seqs,
                 0,
-            )?;
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to generate Kraken report: {}", e))?;
         }
     }
 
@@ -130,84 +148,105 @@ fn main() -> io::Result<()> {
 }
 
 fn parse_command_line(opts: &mut Options) -> Result<(), io::Error> {
-    let matches = App::new("dump_table")
+    let matches = Command::new("dump_table")
         .version("1.0")
         .about("Kraken 2 Database Dumper")
         .arg(
-            Arg::with_name("hashtable_filename")
-                .short("H")
-                .takes_value(true)
+            Arg::new("hashtable_filename")
+                .short('H')
                 .required(true)
+                .value_parser(clap::value_parser!(String))
                 .help("Kraken 2 hash table filename"),
         )
         .arg(
-            Arg::with_name("taxonomy_filename")
-                .short("t")
-                .takes_value(true)
+            Arg::new("taxonomy_filename")
+                .short('t')
                 .required(true)
+                .value_parser(clap::value_parser!(String))
                 .help("Kraken 2 taxonomy filename"),
         )
         .arg(
-            Arg::with_name("options_filename")
-                .short("o")
-                .takes_value(true)
+            Arg::new("options_filename")
+                .short('o')
                 .required(true)
+                .value_parser(clap::value_parser!(String))
                 .help("Kraken 2 database options filename"),
         )
         .arg(
-            Arg::with_name("output_filename")
-                .short("O")
-                .takes_value(true)
-                .help("Output filename (default: /dev/stdout)"),
+            Arg::new("output_filename")
+                .short('O')
+                .value_parser(clap::value_parser!(String))
+                .help("Output filename (def: /dev/fd/1)"),
         )
         .arg(
-            Arg::with_name("use_mpa_style")
-                .short("m")
+            Arg::new("use_mpa_style")
+                .short('m')
+                .action(clap::ArgAction::SetTrue)
                 .help("Use MPA style output instead of Kraken 2 output"),
         )
         .arg(
-            Arg::with_name("skip_counts")
-                .short("s")
+            Arg::new("skip_counts")
+                .short('s')
+                .action(clap::ArgAction::SetTrue)
                 .help("Skip reporting minimizer counts, just show DB stats"),
         )
         .arg(
-            Arg::with_name("report_zeros")
-                .short("z")
+            Arg::new("report_zeros")
+                .short('z')
+                .action(clap::ArgAction::SetTrue)
                 .help("Report taxa with zero counts"),
         )
         .arg(
-            Arg::with_name("num_threads")
-                .short("p")
-                .takes_value(true)
+            Arg::new("num_threads")
+                .short('p')
+                .value_parser(clap::value_parser!(usize))
                 .help("Number of threads"),
         )
         .get_matches();
 
-    opts.hashtable_filename = matches.value_of("hashtable_filename").unwrap().to_string();
-    opts.taxonomy_filename = matches.value_of("taxonomy_filename").unwrap().to_string();
-    opts.options_filename = matches.value_of("options_filename").unwrap().to_string();
+    // Check required parameters
+    opts.hashtable_filename = matches
+        .get_one::<String>("hashtable_filename")
+        .expect("hashtable_filename is required")
+        .clone();
 
-    if let Some(value) = matches.value_of("output_filename") {
-        opts.output_filename = value.to_string();
+    opts.taxonomy_filename = matches
+        .get_one::<String>("taxonomy_filename")
+        .expect("taxonomy_filename is required")
+        .clone();
+
+    opts.options_filename = matches
+        .get_one::<String>("options_filename")
+        .expect("options_filename is required")
+        .clone();
+
+    if let Some(value) = matches.get_one::<String>("output_filename") {
+        opts.output_filename = value.clone();
     }
 
-    if matches.is_present("use_mpa_style") {
-        opts.use_mpa_style = true;
-    }
+    opts.use_mpa_style = matches.get_flag("use_mpa_style");
+    opts.skip_counts = matches.get_flag("skip_counts");
+    opts.report_zeros = matches.get_flag("report_zeros");
 
-    if matches.is_present("skip_counts") {
-        opts.skip_counts = true;
-    }
-
-    if matches.is_present("report_zeros") {
-        opts.report_zeros = true;
-    }
-
-    if let Some(value) = matches.value_of("num_threads") {
-        opts.num_threads = value.parse().unwrap();
+    if let Some(value) = matches.get_one::<usize>("num_threads") {
+        opts.num_threads = *value;
     }
 
     Ok(())
+}
+
+fn print_usage() {
+    eprintln!(
+        "Usage: dump_table <options>\n\n\
+        Options (*mandatory):\n\
+        * -H FILENAME   Kraken 2 hash table filename\n\
+        * -t FILENAME   Kraken 2 taxonomy filename\n\
+        * -o FILENAME   Kraken 2 database options filename\n\
+          -O FILENAME   Output filename (def: /dev/fd/1)\n\
+          -m            Use MPA style output instead of Kraken 2 output\n\
+          -s            Skip reporting minimizer counts, just show DB stats\n\
+          -z            Report taxa with zero counts"
+    );
 }
 
 fn read_index_options(filename: &str) -> io::Result<IndexOptions> {
