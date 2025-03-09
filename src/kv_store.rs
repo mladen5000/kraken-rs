@@ -8,7 +8,7 @@ pub type HKey = u64;
 pub type HValue = u32;
 
 /// A trait representing a key-value store with 64-bit keys and 32-bit values.
-pub trait KeyValueStore {
+pub trait KeyValueStore: Sync + Send {
     fn get(&self, key: u64) -> u64;
 }
 

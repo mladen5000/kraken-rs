@@ -32,7 +32,19 @@ impl IndexOptions {
         let mut file = File::open(filename)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
-        bincode::deserialize(&buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        // Use our own implementation since we just need the bytes copied
+        let size = std::mem::size_of::<Self>();
+        if buffer.len() < size {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "buffer too small"));
+        }
+        
+        let mut result = Self::default();
+        unsafe {
+            let dst_ptr = &mut result as *mut Self as *mut u8;
+            let src_ptr = buffer.as_ptr();
+            std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
+        }
+        Ok(result)
     }
 }
 pub type TaxId = u64;

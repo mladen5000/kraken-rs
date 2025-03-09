@@ -15,7 +15,9 @@ use std::fmt::Write as _;
 
 use crate::aa_translate::translate_to_all_frames;
 use crate::compact_hash::CompactHashTable;
-use crate::kraken2_data::{IndexOptions, TaxId, TaxonCountersMap, TaxonCountsMap, TAXID_MAX};
+use crate::kraken2_data::{
+    IndexOptions, TaxId, TaxonCounters, TaxonCountersMap, TaxonCountsMap, TAXID_MAX,
+};
 use crate::kv_store::KeyValueStore;
 use crate::mmscanner::MinimizerScanner;
 use crate::seqreader::{BatchSequenceReader, Sequence, SequenceFormat};
@@ -83,15 +85,7 @@ struct OutputStreamData {
 
 impl Default for OutputStreamData {
     fn default() -> Self {
-        OutputStreamData {
-            initialized: false,
-            printing_sequences: false,
-            classified_output1: None,
-            classified_output2: None,
-            unclassified_output1: None,
-            unclassified_output2: None,
-            kraken_output: Some(Arc::new(Mutex::new(Box::new(io::stdout())))),
-        }
+        Self::new()
     }
 }
 
@@ -268,7 +262,7 @@ impl ThreadSafeOutput {
     }
 }
 
-fn main() -> Result<(), Error> {
+pub fn main() -> Result<(), Error> {
     let mut opts = Options::default();
     opts.quick_mode = false;
     opts.confidence_threshold = 0.0;
@@ -316,33 +310,17 @@ fn main() -> Result<(), Error> {
     let taxonomy = Taxonomy::new(&opts.taxonomy_filename, opts.use_memory_mapping)?;
 
     // Create and load the hash table
-    let mut file = File::open(&opts.index_filename)?;
-    let metadata = file.metadata()?;
-    let capacity = metadata.len() as usize / std::mem::size_of::<u64>();
-
-    let bits_for_taxid = 32; // Default value
-    let value_bits = (32 - bits_for_taxid) as u8;
-    let hash_ptr = CompactHashTable::new(capacity, value_bits, bits_for_taxid as u8);
-
-    // Load the data
-    let mut buffer = vec![0u64; capacity];
-    file.read_exact(unsafe {
-        std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, capacity * 8)
-    })?;
-    for (i, &value) in buffer.iter().enumerate() {
-        hash_ptr
-            .get_at(i)
-            .store(value, std::sync::atomic::Ordering::Relaxed);
-    }
+    // This matches the C++ version which creates a CompactHashTable
+    let hash_ptr = CompactHashTable::from_file(&opts.index_filename, opts.use_memory_mapping)?;
 
     eprintln!(" done.");
 
     let mut stats = ClassificationStats::default();
-    let mut outputs = OutputStreamData::default();
+    let mut outputs = OutputStreamData::new();
 
     let start_time = Instant::now();
 
-    if args.len() <= 1 {
+    if opts.input_files.is_empty() {
         if opts.paired_end_processing && !opts.single_file_pairs {
             return Err(anyhow::anyhow!(
                 "paired end processing used with no files specified"
@@ -360,17 +338,17 @@ fn main() -> Result<(), Error> {
             &mut taxon_counters,
         )?;
     } else {
-        let mut i = 1;
-        while i < args.len() {
+        let mut i = 0;
+        while i < opts.input_files.len() {
             if opts.paired_end_processing && !opts.single_file_pairs {
-                if i + 1 == args.len() {
+                if i + 1 == opts.input_files.len() {
                     return Err(anyhow::anyhow!(
                         "paired end processing used with unpaired file"
                     ));
                 }
                 process_files(
-                    Some(&args[i]),
-                    Some(&args[i + 1]),
+                    Some(&opts.input_files[i]),
+                    Some(&opts.input_files[i + 1]),
                     &hash_ptr,
                     &taxonomy,
                     &idx_opts,
@@ -382,7 +360,7 @@ fn main() -> Result<(), Error> {
                 i += 2;
             } else {
                 process_files(
-                    Some(&args[i]),
+                    Some(&opts.input_files[i]),
                     None,
                     &hash_ptr,
                     &taxonomy,
@@ -461,7 +439,7 @@ fn report_stats(start_time: Instant, end_time: Instant, stats: &ClassificationSt
 fn process_files(
     filename1: Option<&str>,
     filename2: Option<&str>,
-    hash: &CompactHashTable,
+    hash: &dyn KeyValueStore,
     tax: &Taxonomy,
     idx_opts: &IndexOptions,
     opts: &Options,
@@ -513,9 +491,9 @@ fn process_files(
                         idx_opts.k,
                         idx_opts.l,
                         idx_opts.spaced_seed_mask,
-                        !opts.use_translated_search,
+                        idx_opts.dna_db, // Pass the same value from options
                         idx_opts.toggle_mask,
-                        true,
+                        idx_opts.revcom_version == 1, // Convert u32 to bool
                     );
 
                     let mut taxa = Vec::new();
@@ -532,6 +510,11 @@ fn process_files(
                     let mut thread_taxon_counters = HashMap::new();
 
                     loop {
+                        // Reset thread stats for this block
+                        thread_stats.total_sequences = 0;
+                        thread_stats.total_bases = 0;
+                        thread_stats.total_classified = 0;
+
                         let block_id =
                             next_input_block_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -652,7 +635,7 @@ fn process_files(
                         }
 
                         // Queue output data
-                        let out_data = OutputData {
+                        let mut out_data = OutputData {
                             block_id,
                             kraken_str: kraken_oss.clone(),
                             classified_out1_str: c1_oss.clone(),
@@ -661,18 +644,20 @@ fn process_files(
                             unclassified_out2_str: u2_oss.clone(),
                             str_representation: String::new(),
                         };
+                        out_data.finish_string_representation();
 
-                        // Clear string buffers for next batch
+                        // Reset all dynamically-growing things for next batch
                         kraken_oss.clear();
                         c1_oss.clear();
                         c2_oss.clear();
                         u1_oss.clear();
                         u2_oss.clear();
+                        thread_taxon_counters.clear();
 
                         output_queue.lock().unwrap().push(out_data);
 
                         // Update taxon counters
-                        {
+                        if !opts.report_filename.is_empty() {
                             let mut total_counters = total_taxon_counters_mutex.lock().unwrap();
                             for (taxon, counter) in thread_taxon_counters.drain() {
                                 total_counters
@@ -788,9 +773,12 @@ fn trim_pair_info(id: &str) -> String {
         return id.to_string();
     }
 
-    let chars: Vec<char> = id.chars().collect();
-    if chars[sz - 2] == '/' && (chars[sz - 1] == '1' || chars[sz - 1] == '2') {
-        return id[0..sz - 2].to_string();
+    // Optimize to avoid collecting all chars - just check the relevant positions
+    if id.chars().nth(sz - 2) == Some('/') {
+        let last_char = id.chars().nth(sz - 1);
+        if last_char == Some('1') || last_char == Some('2') {
+            return id[0..sz - 2].to_string();
+        }
     }
 
     id.to_string()
@@ -811,7 +799,6 @@ fn classify_sequence(
     tx_frames: &mut [String],
     curr_taxon_counts: &mut TaxonCountersMap,
 ) -> Result<TaxId, Error> {
-    let _minimizer_ptr: Option<u64> = None;
     taxa.clear();
     hit_counts.clear();
     let frame_ct = if opts.use_translated_search { 6 } else { 1 };
@@ -858,10 +845,13 @@ fn classify_sequence(
                         last_minimizer = min_ptr;
                         if taxon != 0 {
                             minimizer_hit_groups += 1;
-                            curr_taxon_counts
-                                .get_mut(&taxon)
-                                .unwrap()
-                                .add_kmer(scanner.last_minimizer());
+                            // Only add kmer if we're generating a report
+                            if !opts.report_filename.is_empty() {
+                                curr_taxon_counts
+                                    .entry(taxon)
+                                    .or_insert_with(|| TaxonCounters::new_with_precision(10))
+                                    .add_kmer(scanner.last_minimizer());
+                            }
                         }
                     } else {
                         taxon = last_taxon;
@@ -901,10 +891,14 @@ fn classify_sequence(
 
     if result != 0 {
         stats.total_classified += 1;
-        curr_taxon_counts
-            .get_mut(&result)
-            .unwrap()
-            .increment_read_count();
+
+        // Only increment read count if we're generating a report
+        if !opts.report_filename.is_empty() {
+            curr_taxon_counts
+                .entry(result)
+                .or_insert_with(|| TaxonCounters::new_with_precision(10))
+                .increment_read_count();
+        }
     }
 
     if result != 0 {
@@ -1066,7 +1060,8 @@ fn initialize_outputs(
 
     if !opts.kraken_output_filename.is_empty() {
         outputs.kraken_output = if opts.kraken_output_filename == "-" {
-            Some(Arc::new(Mutex::new(Box::new(io::stdout()))))
+            // Special filename to silence Kraken output
+            None
         } else {
             Some(Arc::new(Mutex::new(Box::new(File::create(
                 &opts.kraken_output_filename,
@@ -1100,7 +1095,8 @@ fn mask_low_quality_bases(dna: &mut Sequence, minimum_quality_score: i32) {
 
 fn parse_command_line(args: &[String], opts: &mut Options) -> Result<(), Error> {
     let mut i = 1;
-    while i < args.len() {
+    while i < args.len() && args[i].starts_with('-') {
+        // Only parse options that start with -
         match args[i].as_str() {
             "-h" | "-?" => {
                 usage(0);
@@ -1206,6 +1202,12 @@ fn parse_command_line(args: &[String], opts: &mut Options) -> Result<(), Error> 
         i += 1;
     }
 
+    // Add remaining arguments as input files
+    while i < args.len() {
+        opts.input_files.push(args[i].clone());
+        i += 1;
+    }
+
     if opts.index_filename.is_empty()
         || opts.taxonomy_filename.is_empty()
         || opts.options_filename.is_empty()
@@ -1247,6 +1249,10 @@ fn usage(exit_code: i32) {
     std::process::exit(exit_code);
 }
 
+/// Process a batch of sequences
+///
+/// This function processes a batch of sequences, classifying each one and updating
+/// the appropriate output buffers and statistics.
 fn process_sequence_batch(
     scanner: &mut MinimizerScanner,
     taxa: &mut Vec<TaxId>,
@@ -1261,7 +1267,7 @@ fn process_sequence_batch(
     seq1: &mut Sequence,
     seq2: &mut Sequence,
     thread_taxon_counters: &mut TaxonCountersMap,
-    hash: &CompactHashTable,
+    hash: &dyn KeyValueStore,
     tax: &Taxonomy,
     idx_opts: &IndexOptions,
     opts: &Options,

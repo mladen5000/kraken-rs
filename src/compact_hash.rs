@@ -1,137 +1,436 @@
-use anyhow::Result;
+/*
+ * Copyright 2013-2023, Derrick Wood <dwood@cs.jhu.edu>
+ * Rust conversion Copyright 2025
+ *
+ * This file is part of the Kraken 2 taxonomic sequence classification system.
+ */
+
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::kraken2_data::TaxonCounts;
 use crate::kv_store::KeyValueStore;
+use crate::mmap_file::MMapFile;
+use crate::utilities::murmur_hash3;
 
-pub struct CompactHashTable {
-    table: Box<[AtomicU64]>,
-    value_bits: u8,
-    taxid_bits: u8,
-    value_mask: u64,
-    taxid_mask: u64,
+// CompactHashCell matches the C++ struct
+#[repr(C)]
+pub struct CompactHashCell {
+    data: AtomicU32,
 }
 
-impl CompactHashTable {
-    pub fn new(capacity: usize, value_bits: u8, taxid_bits: u8) -> Self {
-        let table = (0..capacity)
-            .map(|_| AtomicU64::new(0))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+// CompactHashCell is not automatically Clone because AtomicU32 doesn't implement Clone
+// We implement a custom Clone that preserves the atomic value
+impl Clone for CompactHashCell {
+    fn clone(&self) -> Self {
+        Self {
+            data: AtomicU32::new(self.data.load(Ordering::Relaxed)),
+        }
+    }
+}
 
-        let value_mask = (1 << value_bits) - 1;
-        let taxid_mask = (1 << taxid_bits) - 1;
+impl CompactHashCell {
+    pub fn hashed_key(&self, value_bits: u8) -> u64 {
+        (self.data.load(Ordering::Relaxed) >> value_bits) as u64
+    }
+
+    pub fn value(&self, value_bits: u8) -> u64 {
+        (self.data.load(Ordering::Relaxed) & ((1 << value_bits) - 1)) as u64
+    }
+
+    pub fn populate(&self, compacted_key: u64, val: u64, key_bits: u8, value_bits: u8) {
+        assert_eq!(
+            key_bits + value_bits,
+            32,
+            "key_bits + value_bits must equal 32"
+        );
+        assert!(key_bits > 0, "key_bits must be positive");
+        assert!(value_bits > 0, "value_bits must be positive");
+
+        let max_value = (1 << value_bits) - 1;
+        assert!(val <= max_value as u64, "value is too large for value_bits");
+
+        let data = ((compacted_key << value_bits) | val) as u32;
+        self.data.store(data, Ordering::Relaxed);
+    }
+}
+
+impl Default for CompactHashCell {
+    fn default() -> Self {
+        Self {
+            data: AtomicU32::new(0),
+        }
+    }
+}
+
+pub struct CompactHashTable {
+    capacity: usize,
+    size: usize,
+    key_bits: u8,
+    value_bits: u8,
+    table: *mut CompactHashCell,
+    file_backed: bool,
+    backing_file: Option<MMapFile>,
+}
+
+// This is safe because we ensure proper access patterns in our implementation
+unsafe impl Send for CompactHashTable {}
+unsafe impl Sync for CompactHashTable {}
+
+impl CompactHashTable {
+    pub fn new(capacity: usize, key_bits: u8, value_bits: u8) -> Self {
+        assert_eq!(
+            key_bits + value_bits,
+            32,
+            "key_bits + value_bits must equal 32"
+        );
+        assert!(key_bits > 0, "key_bits must be positive");
+        assert!(value_bits > 0, "value_bits must be positive");
+
+        let table = Box::into_raw(vec![CompactHashCell::default(); capacity].into_boxed_slice())
+            as *mut CompactHashCell;
 
         Self {
-            table,
+            capacity,
+            size: 0,
+            key_bits,
             value_bits,
-            taxid_bits,
-            value_mask,
-            taxid_mask,
+            table,
+            file_backed: false,
+            backing_file: None,
         }
     }
 
-    pub fn write_table(&self, path: &str) -> Result<()> {
-        let mut file = File::create(path)?;
-        for value in self.table.iter() {
-            file.write_all(&value.load(Ordering::Relaxed).to_le_bytes())?;
+    pub fn from_file(filename: &str, memory_mapping: bool) -> Result<Self> {
+        Self::load_table(filename, memory_mapping)
+    }
+
+    fn load_table(filename: &str, memory_mapping: bool) -> Result<Self> {
+        if memory_mapping {
+            let backing_file =
+                MMapFile::open_file(filename).context("Failed to memory map hash table file")?;
+
+            let ptr = backing_file.fptr();
+            let mut offset = 0;
+
+            // Read header values
+            let capacity = unsafe {
+                let val_ptr = ptr.as_ptr().add(offset) as *const usize;
+                offset += std::mem::size_of::<usize>();
+                *val_ptr
+            };
+
+            let size = unsafe {
+                let val_ptr = ptr.as_ptr().add(offset) as *const usize;
+                offset += std::mem::size_of::<usize>();
+                *val_ptr
+            };
+
+            let key_bits = unsafe {
+                let val_ptr = ptr.as_ptr().add(offset) as *const u8;
+                offset += std::mem::size_of::<u8>();
+                *val_ptr
+            };
+
+            let value_bits = unsafe {
+                let val_ptr = ptr.as_ptr().add(offset) as *const u8;
+                offset += std::mem::size_of::<u8>();
+                *val_ptr
+            };
+
+            // Pad to 8-byte alignment if necessary
+            if offset % 8 != 0 {
+                offset += 8 - (offset % 8);
+            }
+
+            // Table data starts at this offset
+            let table = unsafe { ptr.as_ptr().add(offset) as *mut CompactHashCell };
+
+            // Verify file size matches expected size
+            let expected_size = offset + capacity * std::mem::size_of::<CompactHashCell>();
+            if backing_file.len() < expected_size {
+                anyhow::bail!(
+                    "Hash table file size mismatch, expected at least {} bytes",
+                    expected_size
+                );
+            }
+
+            Ok(Self {
+                capacity,
+                size,
+                key_bits,
+                value_bits,
+                table,
+                file_backed: true,
+                backing_file: Some(backing_file),
+            })
+        } else {
+            let mut file = File::open(filename).context("Failed to open hash table file")?;
+
+            // Read header values
+            let mut capacity = 0usize;
+            let mut size = 0usize;
+            let mut key_bits = 0u8;
+            let mut value_bits = 0u8;
+
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut capacity as *mut usize as *mut u8,
+                    std::mem::size_of::<usize>(),
+                )
+            })?;
+
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut size as *mut usize as *mut u8,
+                    std::mem::size_of::<usize>(),
+                )
+            })?;
+
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut key_bits as *mut u8 as *mut u8,
+                    std::mem::size_of::<u8>(),
+                )
+            })?;
+
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut value_bits as *mut u8 as *mut u8,
+                    std::mem::size_of::<u8>(),
+                )
+            })?;
+
+            // Allocate table
+            let table = Box::into_raw(vec![CompactHashCell::default(); capacity].into_boxed_slice())
+                as *mut CompactHashCell;
+
+            // Read the table data
+            file.read_exact(unsafe {
+                std::slice::from_raw_parts_mut(
+                    table as *mut u8,
+                    capacity * std::mem::size_of::<CompactHashCell>(),
+                )
+            })?;
+
+            Ok(Self {
+                capacity,
+                size,
+                key_bits,
+                value_bits,
+                table,
+                file_backed: false,
+                backing_file: None,
+            })
         }
+    }
+
+    pub fn write_table(&self, filename: &str) -> Result<()> {
+        let mut file = File::create(filename).context("Failed to create hash table file")?;
+
+        // Write header values
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.capacity as *const usize as *const u8,
+                std::mem::size_of::<usize>(),
+            )
+        })?;
+
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.size as *const usize as *const u8,
+                std::mem::size_of::<usize>(),
+            )
+        })?;
+
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.key_bits as *const u8 as *const u8,
+                std::mem::size_of::<u8>(),
+            )
+        })?;
+
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                &self.value_bits as *const u8 as *const u8,
+                std::mem::size_of::<u8>(),
+            )
+        })?;
+
+        // Write the table data
+        file.write_all(unsafe {
+            std::slice::from_raw_parts(
+                self.table as *const u8,
+                self.capacity * std::mem::size_of::<CompactHashCell>(),
+            )
+        })?;
+
         Ok(())
     }
 
-    pub fn node_count(&self) -> usize {
-        self.table.len()
-    }
-
-    pub fn get_at(&self, idx: usize) -> &AtomicU64 {
-        &self.table[idx]
-    }
-
-    pub fn find_index(&self, key: u64, idx: &mut usize) -> bool {
-        let probe_idx = (key & (self.table.len() as u64 - 1)) as usize;
-        *idx = probe_idx;
-        let value = self.table[probe_idx].load(Ordering::Relaxed);
-        let stored_key = (value >> (self.value_bits + self.taxid_bits)) & self.value_mask;
-        stored_key == key
-    }
-
-    pub fn compare_and_set(&mut self, key: u64, new_value: u64, old_value: &mut u64) -> bool {
-        let probe_idx = (key & (self.table.len() as u64 - 1)) as usize;
-        let current = self.table[probe_idx].load(Ordering::Relaxed);
-        let stored_key = (current >> (self.value_bits + self.taxid_bits)) & self.value_mask;
-
-        if stored_key == 0 {
-            // Empty slot - we can insert
-            *old_value = 0;
-            let new_packed =
-                (key << (self.value_bits + self.taxid_bits)) | (new_value & self.taxid_mask);
-
-            self.table[probe_idx].store(new_packed, Ordering::Relaxed);
-            true
-        } else if stored_key == key {
-            // Found existing key
-            *old_value = current & self.taxid_mask;
-            false
-        } else {
-            // Different key in this slot
-            *old_value = 0;
-            false
-        }
-    }
-
-    pub fn set_minimizer_lca(
-        &mut self,
-        key: u64,
-        taxid: u64,
-        taxonomy: &crate::taxonomy::Taxonomy,
-    ) {
-        let mut old_value = 0;
-        let mut new_value = taxid;
-        while !self.compare_and_set(key, new_value, &mut old_value) {
-            if old_value == 0 {
-                // Means there was a different key in the slot
-                break;
-            }
-            new_value = taxonomy.lowest_common_ancestor(old_value, taxid);
-        }
-    }
-
     pub fn size(&self) -> usize {
-        let mut count = 0;
-        for value in self.table.iter() {
-            if value.load(Ordering::Relaxed) != 0 {
-                count += 1;
-            }
-        }
-        count
+        self.size
     }
 
     pub fn capacity(&self) -> usize {
-        self.table.len()
+        self.capacity
     }
 
-    pub fn get_value_counts(&self) -> HashMap<u64, u64> {
+    pub fn key_bits(&self) -> u8 {
+        self.key_bits
+    }
+
+    pub fn value_bits(&self) -> u8 {
+        self.value_bits
+    }
+
+    pub fn occupancy(&self) -> f64 {
+        self.size as f64 / self.capacity as f64
+    }
+
+    // Implements the same logic as the C++ second_hash function
+    fn second_hash(&self, first_hash: u64) -> usize {
+        // Use the same approach as in C++
+        #[cfg(feature = "linear_probing")]
+        {
+            return 1;
+        }
+
+        #[cfg(not(feature = "linear_probing"))]
+        {
+            return ((first_hash >> 8) | 1) as usize;
+        }
+
+        // Default implementation if neither feature is enabled
+        // (matches the non-linear-probing behavior from C++)
+        return ((first_hash >> 8) | 1) as usize;
+    }
+
+    pub fn get_value_counts(&self) -> TaxonCounts {
         let mut counts = HashMap::new();
-        for value in self.table.iter() {
-            let packed = value.load(Ordering::Relaxed);
-            if packed != 0 {
-                let taxid = packed & self.taxid_mask;
-                *counts.entry(taxid).or_insert(0) += 1;
+
+        // This would ideally be parallelized like in the C++ version
+        for i in 0..self.capacity {
+            unsafe {
+                let cell = &*self.table.add(i);
+                let val = cell.value(self.value_bits);
+                if val > 0 {
+                    *counts.entry(val).or_insert(0) += 1;
+                }
             }
         }
+
         counts
+    }
+
+    pub fn find_index(&self, key: u64, idx: &mut usize) -> bool {
+        let hc = murmur_hash3(key);
+        let compacted_key = hc >> (32 + self.value_bits as u64);
+        *idx = (hc % self.capacity as u64) as usize;
+        let first_idx = *idx;
+        let mut step = 0;
+
+        loop {
+            unsafe {
+                let cell = &*self.table.add(*idx);
+                if cell.value(self.value_bits) == 0 {
+                    // Empty cell, search is over
+                    return false;
+                }
+
+                if cell.hashed_key(self.value_bits) == compacted_key {
+                    return true;
+                }
+
+                if step == 0 {
+                    step = self.second_hash(hc);
+                }
+
+                *idx += step;
+                *idx %= self.capacity;
+
+                if *idx == first_idx {
+                    // We've exhausted the table
+                    break;
+                }
+            }
+        }
+
+        false
     }
 }
 
 impl KeyValueStore for CompactHashTable {
     fn get(&self, key: u64) -> u64 {
-        let mut idx = 0;
-        if self.find_index(key, &mut idx) {
-            self.table[idx].load(Ordering::Relaxed) & self.taxid_mask
-        } else {
-            0
+        let hc = murmur_hash3(key);
+        let compacted_key = hc >> (32 + self.value_bits as u64);
+        let mut idx = (hc % self.capacity as u64) as usize;
+        let first_idx = idx;
+        let mut step = 0;
+
+        loop {
+            unsafe {
+                let cell = &*self.table.add(idx);
+                if cell.value(self.value_bits) == 0 {
+                    // Empty cell, search is over
+                    break;
+                }
+
+                if cell.hashed_key(self.value_bits) == compacted_key {
+                    return cell.value(self.value_bits);
+                }
+
+                if step == 0 {
+                    step = self.second_hash(hc);
+                }
+
+                idx += step;
+                idx %= self.capacity;
+
+                if idx == first_idx {
+                    // We've exhausted the table
+                    break;
+                }
+            }
         }
+
+        0
+    }
+}
+
+impl Drop for CompactHashTable {
+    fn drop(&mut self) {
+        if !self.file_backed {
+            unsafe {
+                // Deallocate the table if it's not file-backed
+                Box::from_raw(std::slice::from_raw_parts_mut(self.table, self.capacity));
+            }
+        }
+        // The backing_file will be dropped automatically if it exists
+    }
+}
+
+// Helper functions for tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_compact_hash_cell() {
+        let cell = CompactHashCell::default();
+        cell.populate(123, 456, 24, 8);
+        assert_eq!(cell.hashed_key(8), 123);
+        assert_eq!(cell.value(8), 456);
+    }
+
+    #[test]
+    fn test_get() {
+        let table = CompactHashTable::new(1024, 24, 8);
+        // We'd need to set values manually for testing
+        // This would require unsafe code to manipulate the table
     }
 }
