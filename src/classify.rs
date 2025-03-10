@@ -1327,7 +1327,10 @@ mod tests {
     use super::*;
     use crate::kraken2_data::TaxonCounters;
     use crate::seqreader::{Sequence, SequenceFormat};
+    use crate::taxonomy::TaxonomyNode;
+    use crate::kv_store::KeyValueStore;
     use std::io::Cursor;
+    use tempfile::tempdir;
 
     #[test]
     fn test_trim_pair_info() {
@@ -1429,5 +1432,282 @@ mod tests {
 
         counter.add_kmer(42);
         assert!(counter.get_kmer_distinct() > 0.0);
+    }
+    
+    #[test]
+    fn test_add_hitlist_string_detailed() {
+        // Setup a simple mock taxonomy for testing
+        let mut taxonomy = Taxonomy::default();
+        
+        // Create a test taxonomy properly without directly modifying private fields
+        let temp_dir = tempdir().unwrap();
+        let taxonomy_path = temp_dir.path().join("taxonomy.bin");
+        let mut file = File::create(&taxonomy_path).unwrap();
+        
+        // Write a minimal valid taxonomy file
+        file.write_all(b"K2TAXDAT").unwrap(); // Magic
+        file.write_all(&6usize.to_le_bytes()).unwrap(); // node_count
+        file.write_all(&10usize.to_le_bytes()).unwrap(); // name_data_len
+        file.write_all(&10usize.to_le_bytes()).unwrap(); // rank_data_len
+        
+        // Write nodes (careful with endianness)
+        for i in 0..6 {
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // parent_id
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+            file.write_all(&(i as u64).to_le_bytes()).unwrap(); // external_id
+            file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        }
+        
+        // Write dummy name and rank data
+        file.write_all(&[0; 10]).unwrap(); // name_data
+        file.write_all(&[0; 10]).unwrap(); // rank_data
+        
+        let taxonomy = Taxonomy::new(&taxonomy_path, false).unwrap();
+        
+        // Test case 1: Simple list with single taxon
+        let mut taxa = vec![2, 2, 2];
+        let mut result = String::new();
+        add_hitlist_string(&mut result, &taxa, &taxonomy);
+        assert_eq!(result, "2:3");
+        
+        // Test case 2: Multiple different taxa
+        taxa = vec![1, 1, 2, 3, 3, 3];
+        result.clear();
+        add_hitlist_string(&mut result, &taxa, &taxonomy);
+        assert_eq!(result, "1:2 2:1 3:3");
+        
+        // Test case 3: With mate pair and reading frame borders
+        taxa = vec![1, 1, READING_FRAME_BORDER_TAXON, 2, 2, MATE_PAIR_BORDER_TAXON, 3, 3];
+        result.clear();
+        add_hitlist_string(&mut result, &taxa, &taxonomy);
+        assert_eq!(result, "1:2 -:- 2:2 |:| 3:2");
+        
+        // Test case 4: With ambiguous spans
+        taxa = vec![1, AMBIGUOUS_SPAN_TAXON, AMBIGUOUS_SPAN_TAXON, 2, 2];
+        result.clear();
+        add_hitlist_string(&mut result, &taxa, &taxonomy);
+        assert_eq!(result, "1:1 A:2 2:2");
+    }
+
+    #[test]
+    fn test_advanced_low_quality_bases() {
+        // Setup a test sequence 
+        let mut seq = Sequence {
+            format: SequenceFormat::Fastq,
+            header: "test".to_string(),
+            id: "test".to_string(),
+            seq: "ACGTACGT".to_string(),
+            quals: "!!#$%&'(".to_string(), // ASCII 33-40
+            str_representation: String::new(),
+        };
+        
+        // Test with minimum quality 36 ($ character)
+        mask_low_quality_bases(&mut seq, 36);
+        
+        // First three bases should be masked (!, !, #)
+        assert_eq!(seq.seq, "xxxTACGT");
+        
+        // Test with higher minimum quality
+        seq.seq = "ACGTACGT".to_string();
+        mask_low_quality_bases(&mut seq, 38);
+        
+        // First five bases should be masked
+        assert_eq!(seq.seq, "xxxxxGT");
+    }
+    
+    #[test]
+    fn test_extended_pair_info() {
+        // Test standard Illumina pair notation
+        assert_eq!(trim_pair_info("read1/1"), "read1");
+        assert_eq!(trim_pair_info("read2/2"), "read2");
+        
+        // Test with no pair info
+        assert_eq!(trim_pair_info("readX"), "readX");
+        
+        // Test with unusual formats
+        assert_eq!(trim_pair_info("read/3"), "read/3"); // Not 1 or 2
+        assert_eq!(trim_pair_info("read//1"), "read//1"); // Invalid
+        
+        // Test short strings
+        assert_eq!(trim_pair_info("a"), "a");
+        assert_eq!(trim_pair_info(""), "");
+    }
+    
+    #[test]
+    fn test_extended_command_line() {
+        // Create test args
+        let args = vec![
+            "classify".to_string(),
+            "-H".to_string(), "hash.bin".to_string(),
+            "-t".to_string(), "taxonomy.bin".to_string(),
+            "-o".to_string(), "options.bin".to_string(),
+            "-p".to_string(), "4".to_string(),
+            "-T".to_string(), "0.5".to_string(),
+        ];
+        
+        let mut opts = Options::default();
+        parse_command_line(&args, &mut opts).unwrap();
+        
+        // Check parsed options
+        assert_eq!(opts.index_filename, "hash.bin");
+        assert_eq!(opts.taxonomy_filename, "taxonomy.bin");
+        assert_eq!(opts.options_filename, "options.bin");
+        assert_eq!(opts.num_threads, 4);
+        assert_eq!(opts.confidence_threshold, 0.5);
+        assert!(!opts.quick_mode);
+        
+        // Test with additional options
+        let args = vec![
+            "classify".to_string(),
+            "-H".to_string(), "hash.bin".to_string(),
+            "-t".to_string(), "taxonomy.bin".to_string(),
+            "-o".to_string(), "options.bin".to_string(),
+            "-q".to_string(), // Quick mode
+            "-P".to_string(), // Paired end
+            "-n".to_string(), // Print scientific name
+        ];
+        
+        let mut opts = Options::default();
+        parse_command_line(&args, &mut opts).unwrap();
+        
+        assert!(opts.quick_mode);
+        assert!(opts.paired_end_processing);
+        assert!(opts.print_scientific_name);
+    }
+    
+    #[test]
+    fn test_extended_tree_resolution() {
+        // Create a properly initialized taxonomy
+        let temp_dir = tempdir().unwrap();
+        let taxonomy_path = temp_dir.path().join("taxonomy.bin");
+        let mut file = File::create(&taxonomy_path).unwrap();
+        
+        // Create a simple taxonomy with known structure:
+        //       1 (root)
+        //      / \
+        //     2   3
+        //    / \   \
+        //   4   5   6
+        
+        // Write file magic and header
+        file.write_all(b"K2TAXDAT").unwrap(); // Magic
+        file.write_all(&7usize.to_le_bytes()).unwrap(); // node_count
+        file.write_all(&10usize.to_le_bytes()).unwrap(); // name_data_len
+        file.write_all(&10usize.to_le_bytes()).unwrap(); // rank_data_len
+        
+        // Node 0 (unused)
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 1 (root)
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&1u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 2
+        file.write_all(&1u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&2u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 3
+        file.write_all(&1u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&3u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 4
+        file.write_all(&2u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&4u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 5
+        file.write_all(&2u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&5u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 6
+        file.write_all(&3u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&6u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Write dummy name and rank data
+        file.write_all(&[0; 10]).unwrap(); // name_data
+        file.write_all(&[0; 10]).unwrap(); // rank_data
+        
+        let taxonomy = Taxonomy::new(&taxonomy_path, false).unwrap();
+        
+        // Test case 1: Hit counts concentrated on leaf nodes
+        let mut hit_counts = TaxonCountsMap::new();
+        hit_counts.insert(4, 3);
+        hit_counts.insert(5, 2);
+        hit_counts.insert(6, 1);
+        
+        let opts = Options {
+            confidence_threshold: 0.5,
+            ..Default::default()
+        };
+        
+        // With threshold 0.5 and 6 minimizers, need at least 3 hits
+        // Node 4 has 3 hits, so it should be the winner
+        let result = resolve_tree(&hit_counts, &taxonomy, 6, &opts);
+        assert_eq!(result, 4);
+        
+        // Test case 2: Identical hit counts, should resolve to LCA
+        hit_counts.clear();
+        hit_counts.insert(4, 2);
+        hit_counts.insert(5, 2);
+        
+        // With identical hit counts, should resolve to common ancestor (2)
+        let result = resolve_tree(&hit_counts, &taxonomy, 10, &opts);
+        assert_eq!(result, 2);
+        
+        // Test case 3: High confidence threshold forcing a higher-level classification
+        let opts = Options {
+            confidence_threshold: 0.8,
+            ..Default::default()
+        };
+        
+        hit_counts.clear();
+        hit_counts.insert(4, 5);
+        hit_counts.insert(5, 2);
+        hit_counts.insert(6, 1);
+        
+        // With threshold 0.8 and 10 minimizers, need 8 hits
+        // Node 4 has 5 hits, not enough; walking up the tree:
+        // Node 2 has 7 hits (4+5), still not enough
+        // Node 1 has 8 hits (4+5+6), which is enough
+        let result = resolve_tree(&hit_counts, &taxonomy, 10, &opts);
+        assert_eq!(result, 1);
     }
 }

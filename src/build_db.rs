@@ -990,3 +990,165 @@ fn main() {
 
     eprintln!("complete.");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_extract_ncbi_sequence_ids() {
+        // Normal header
+        let header = "sequence1 some description";
+        let ids = extract_ncbi_sequence_ids(header);
+        assert_eq!(ids, vec!["sequence1"]);
+
+        // Header with multiple IDs separated by 0x01 character
+        let header = "sequence1 desc\x01sequence2 other desc";
+        let ids = extract_ncbi_sequence_ids(header);
+        assert_eq!(ids, vec!["sequence1", "sequence2"]);
+        
+        // Header with multiple whitespace-separated IDs
+        let header = "seq1 desc seq2 other";
+        let ids = extract_ncbi_sequence_ids(header);
+        assert_eq!(ids, vec!["seq1"]);
+        
+        // Empty header
+        let header = "";
+        let ids = extract_ncbi_sequence_ids(header);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_process_sequence_fast() {
+        // This is a simplified test to make sure compile-time checking works
+        // We're not testing the full logic due to complexity of setup
+        
+        let seq = "ACGTACGT";
+        let taxid: taxid_t = 1;
+        let hash = CompactHashTable::new(10, 24, 8);
+        
+        // Create a minimal taxonomy
+        let temp_dir = tempdir().unwrap();
+        let taxonomy_path = temp_dir.path().join("taxonomy.bin");
+        let mut file = File::create(&taxonomy_path).unwrap();
+        
+        // Write a minimal valid taxonomy file
+        file.write_all(b"K2TAXDAT").unwrap(); // Magic
+        file.write_all(&2usize.to_le_bytes()).unwrap(); // node_count - just 2 nodes
+        file.write_all(&5usize.to_le_bytes()).unwrap(); // name_data_len
+        file.write_all(&5usize.to_le_bytes()).unwrap(); // rank_data_len
+        
+        // Node 0
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Node 1
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // parent_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // first_child
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // child_count
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // name_offset
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // rank_offset
+        file.write_all(&1u64.to_le_bytes()).unwrap(); // external_id
+        file.write_all(&0u64.to_le_bytes()).unwrap(); // godparent_id
+        
+        // Write dummy name and rank data
+        file.write_all(&[0; 5]).unwrap(); // name_data
+        file.write_all(&[0; 5]).unwrap(); // rank_data
+        
+        let tax = Taxonomy::new(&taxonomy_path, false).unwrap();
+        
+        // Create a minimizer scanner with reasonable defaults
+        let mut scanner = MinimizerScanner::new(3, 2, 0, true, 0, true);
+        
+        // This test just verifies the function doesn't panic
+        process_sequence_fast(seq, taxid, &hash, &tax, &mut scanner, 0);
+        
+        // Success if we reach here without panicking
+        assert!(true);
+    }
+
+    #[test]
+    fn test_read_id_to_taxon_map() {
+        let mut id_map = HashMap::new();
+        
+        // Create a temporary file with test data
+        let temp_dir = tempdir().unwrap();
+        let map_file_path = temp_dir.path().join("id_to_taxon.map");
+        
+        {
+            let mut file = File::create(&map_file_path).unwrap();
+            writeln!(file, "sequence1 5").unwrap();
+            writeln!(file, "sequence2 10").unwrap();
+            writeln!(file, "sequence3 0").unwrap(); // Should be skipped
+            writeln!(file, "sequence4 invalid").unwrap(); // Should be skipped
+            writeln!(file, "").unwrap(); // Empty line should be skipped
+        }
+        
+        read_id_to_taxon_map(&mut id_map, &map_file_path.to_string_lossy());
+        
+        assert_eq!(id_map.len(), 2);
+        assert_eq!(id_map.get("sequence1"), Some(&5));
+        assert_eq!(id_map.get("sequence2"), Some(&10));
+        assert_eq!(id_map.get("sequence3"), None);
+        assert_eq!(id_map.get("sequence4"), None);
+    }
+
+    #[test]
+    fn test_parse_command_line() {
+        // Test with minimal valid parameters
+        let args = vec![
+            "build_db".to_string(),
+            "-H".to_string(), "hash.bin".to_string(),
+            "-m".to_string(), "map.txt".to_string(),
+            "-t".to_string(), "taxonomy.bin".to_string(),
+            "-n".to_string(), "/taxonomy".to_string(),
+            "-o".to_string(), "options.bin".to_string(),
+            "-k".to_string(), "31".to_string(),
+            "-l".to_string(), "15".to_string(),
+            "-c".to_string(), "1000000".to_string(),
+        ];
+        
+        let mut opts = Options::default();
+        parse_command_line(&args, &mut opts);
+        
+        assert_eq!(opts.hashtable_filename, "hash.bin");
+        assert_eq!(opts.ID_to_taxon_map_filename, "map.txt");
+        assert_eq!(opts.taxonomy_filename, "taxonomy.bin");
+        assert_eq!(opts.ncbi_taxonomy_directory, "/taxonomy");
+        assert_eq!(opts.options_filename, "options.bin");
+        assert_eq!(opts.k, 31);
+        assert_eq!(opts.l, 15);
+        assert_eq!(opts.capacity, 1000000);
+        
+        // Test with additional parameters
+        let args = vec![
+            "build_db".to_string(),
+            "-H".to_string(), "hash.bin".to_string(),
+            "-m".to_string(), "map.txt".to_string(),
+            "-t".to_string(), "taxonomy.bin".to_string(),
+            "-n".to_string(), "/taxonomy".to_string(),
+            "-o".to_string(), "options.bin".to_string(),
+            "-k".to_string(), "31".to_string(),
+            "-l".to_string(), "15".to_string(),
+            "-c".to_string(), "1000000".to_string(),
+            "-p".to_string(), "4".to_string(),
+            "-X".to_string(), // protein input
+            "-F".to_string(), // non-deterministic build
+        ];
+        
+        let mut opts = Options::default();
+        parse_command_line(&args, &mut opts);
+        
+        assert_eq!(opts.num_threads, 4);
+        assert!(opts.input_is_protein);
+        assert!(!opts.deterministic_build);
+    }
+}

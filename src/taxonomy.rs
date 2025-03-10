@@ -555,6 +555,244 @@ impl Drop for Taxonomy {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    use tempfile::tempdir;
+
+    fn create_test_taxonomy() -> (Taxonomy, tempfile::TempDir) {
+        let temp_dir = tempdir().unwrap();
+        let taxonomy_path = temp_dir.path().join("taxonomy.bin");
+        
+        // Create a simple taxonomy with known structure:
+        //       1 (root)
+        //      / \
+        //     2   3
+        //    /     \
+        //   4       5
+        let mut taxonomy = Taxonomy::default();
+        taxonomy.node_count = 6; // 0-5, where 0 is unused
+        
+        let mut nodes = vec![TaxonomyNode::default(); 6];
+        
+        // Root node (id 1)
+        nodes[1] = TaxonomyNode {
+            parent_id: 0,
+            first_child: 2,
+            child_count: 2,
+            name_offset: 0,
+            rank_offset: 0,
+            external_id: 1,
+            godparent_id: 0,
+        };
+        
+        // Node 2
+        nodes[2] = TaxonomyNode {
+            parent_id: 1,
+            first_child: 4,
+            child_count: 1,
+            name_offset: 5,
+            rank_offset: 0,
+            external_id: 2,
+            godparent_id: 0,
+        };
+        
+        // Node 3
+        nodes[3] = TaxonomyNode {
+            parent_id: 1,
+            first_child: 5,
+            child_count: 1,
+            name_offset: 10,
+            rank_offset: 0,
+            external_id: 3,
+            godparent_id: 0,
+        };
+        
+        // Node 4
+        nodes[4] = TaxonomyNode {
+            parent_id: 2,
+            first_child: 0,
+            child_count: 0,
+            name_offset: 15,
+            rank_offset: 0,
+            external_id: 4,
+            godparent_id: 0,
+        };
+        
+        // Node 5
+        nodes[5] = TaxonomyNode {
+            parent_id: 3,
+            first_child: 0,
+            child_count: 0,
+            name_offset: 20,
+            rank_offset: 0,
+            external_id: 5,
+            godparent_id: 0,
+        };
+        
+        taxonomy.nodes = nodes;
+        
+        // Create name data
+        taxonomy.name_data = b"root\0node2\0node3\0node4\0node5\0".to_vec();
+        taxonomy.name_data_len = taxonomy.name_data.len();
+        
+        // Create rank data
+        taxonomy.rank_data = b"root\0phylum\0class\0genus\0species\0".to_vec();
+        taxonomy.rank_data_len = taxonomy.rank_data.len();
+        
+        // Create external to internal ID map
+        taxonomy.external_to_internal_id_map.insert(0, 0);
+        taxonomy.external_to_internal_id_map.insert(1, 1);
+        taxonomy.external_to_internal_id_map.insert(2, 2);
+        taxonomy.external_to_internal_id_map.insert(3, 3);
+        taxonomy.external_to_internal_id_map.insert(4, 4);
+        taxonomy.external_to_internal_id_map.insert(5, 5);
+        
+        // Write the taxonomy to file for tests that need it
+        taxonomy.write_to_disk(&taxonomy_path).unwrap();
+        
+        (taxonomy, temp_dir)
+    }
+
+    #[test]
+    fn test_lowest_common_ancestor() {
+        let (taxonomy, _temp_dir) = create_test_taxonomy();
+        
+        // Test with node being its own ancestor
+        assert_eq!(taxonomy.lowest_common_ancestor(2, 2), 2);
+        
+        // Test with one node being 0
+        assert_eq!(taxonomy.lowest_common_ancestor(0, 3), 3);
+        assert_eq!(taxonomy.lowest_common_ancestor(4, 0), 4);
+        
+        // Test with siblings
+        assert_eq!(taxonomy.lowest_common_ancestor(2, 3), 1);
+        
+        // Test with one node being ancestor of the other
+        assert_eq!(taxonomy.lowest_common_ancestor(1, 4), 1);
+        assert_eq!(taxonomy.lowest_common_ancestor(4, 2), 2);
+        
+        // Test with nodes in different subtrees
+        assert_eq!(taxonomy.lowest_common_ancestor(4, 5), 1);
+    }
+    
+    #[test]
+    fn test_is_a_ancestor_of_b() {
+        let (taxonomy, _temp_dir) = create_test_taxonomy();
+        
+        // Test direct parent-child relationship
+        assert!(taxonomy.is_a_ancestor_of_b(2, 4));
+        assert!(taxonomy.is_a_ancestor_of_b(1, 4));
+        
+        // Test non-ancestor relationship
+        assert!(!taxonomy.is_a_ancestor_of_b(2, 5));
+        assert!(!taxonomy.is_a_ancestor_of_b(4, 2)); // Child is not ancestor of parent
+        
+        // Test self-relationship
+        assert!(taxonomy.is_a_ancestor_of_b(3, 3));
+        
+        // Test with zero values
+        assert!(!taxonomy.is_a_ancestor_of_b(0, 1));
+        assert!(!taxonomy.is_a_ancestor_of_b(1, 0));
+    }
+    
+    #[test]
+    fn test_name_at() {
+        let (taxonomy, _temp_dir) = create_test_taxonomy();
+        
+        // Test valid offsets
+        assert_eq!(taxonomy.name_at(0), Some("root"));
+        assert_eq!(taxonomy.name_at(5), Some("node2"));
+        assert_eq!(taxonomy.name_at(15), Some("node4"));
+        
+        // Test invalid offset
+        assert_eq!(taxonomy.name_at(100), None);
+    }
+    
+    #[test]
+    fn test_read_write_taxonomy() {
+        let (original_taxonomy, temp_dir) = create_test_taxonomy();
+        let taxonomy_path = temp_dir.path().join("test_rw.bin");
+        
+        // Write the taxonomy to a file
+        original_taxonomy.write_to_disk(&taxonomy_path).unwrap();
+        
+        // Read it back
+        let loaded_taxonomy = Taxonomy::new(&taxonomy_path, false).unwrap();
+        
+        // Check that the read taxonomy matches the original
+        assert_eq!(loaded_taxonomy.node_count(), original_taxonomy.node_count());
+        assert_eq!(loaded_taxonomy.name_data().len(), original_taxonomy.name_data().len());
+        assert_eq!(loaded_taxonomy.rank_data().len(), original_taxonomy.rank_data().len());
+        
+        // Compare the first few nodes
+        for i in 1..6 {
+            assert_eq!(loaded_taxonomy.nodes()[i].parent_id, original_taxonomy.nodes()[i].parent_id);
+            assert_eq!(loaded_taxonomy.nodes()[i].external_id, original_taxonomy.nodes()[i].external_id);
+        }
+    }
+    
+    #[test]
+    fn test_ncbi_taxonomy_impl() {
+        let temp_dir = tempdir().unwrap();
+        let nodes_path = temp_dir.path().join("nodes.dmp");
+        let names_path = temp_dir.path().join("names.dmp");
+        
+        // Create simplified NCBI taxonomy files
+        {
+            let mut nodes_file = BufWriter::new(File::create(&nodes_path).unwrap());
+            // Format: taxid | parent taxid | rank | ...
+            writeln!(nodes_file, "1\t|\t1\t|\tno rank\t|\t").unwrap(); // root
+            writeln!(nodes_file, "2\t|\t1\t|\tphylum\t|\t").unwrap();
+            writeln!(nodes_file, "3\t|\t1\t|\tphylum\t|\t").unwrap();
+            writeln!(nodes_file, "4\t|\t2\t|\tclass\t|\t").unwrap();
+            writeln!(nodes_file, "5\t|\t3\t|\tclass\t|\t").unwrap();
+        }
+        
+        {
+            let mut names_file = BufWriter::new(File::create(&names_path).unwrap());
+            // Format: taxid | name | unique name | name class |
+            writeln!(names_file, "1\t|\troot\t|\t\t|\tscientific name\t|\t").unwrap();
+            writeln!(names_file, "2\t|\tBacteria\t|\t\t|\tscientific name\t|\t").unwrap();
+            writeln!(names_file, "3\t|\tArchaea\t|\t\t|\tscientific name\t|\t").unwrap();
+            writeln!(names_file, "4\t|\tProteobacteria\t|\t\t|\tscientific name\t|\t").unwrap();
+            writeln!(names_file, "5\t|\tEuryarchaeota\t|\t\t|\tscientific name\t|\t").unwrap();
+        }
+        
+        // Parse the taxonomy
+        let ncbi_taxonomy = NCBITaxonomyImpl::new(&nodes_path, &names_path).unwrap();
+        
+        // Check that parsing worked
+        assert_eq!(ncbi_taxonomy.parent_map.len(), 5);
+        assert_eq!(ncbi_taxonomy.name_map.len(), 5);
+        assert_eq!(ncbi_taxonomy.rank_map.len(), 5);
+        
+        // Test mark_node
+        let mut ncbi_taxonomy_for_marking = ncbi_taxonomy.clone();
+        ncbi_taxonomy_for_marking.mark_node(4);
+        
+        // This should have marked 4, 2, and 1 (the path to root)
+        assert!(ncbi_taxonomy_for_marking.marked_nodes.contains(&4));
+        assert!(ncbi_taxonomy_for_marking.marked_nodes.contains(&2));
+        assert!(ncbi_taxonomy_for_marking.marked_nodes.contains(&1));
+        assert!(!ncbi_taxonomy_for_marking.marked_nodes.contains(&3));
+        assert!(!ncbi_taxonomy_for_marking.marked_nodes.contains(&5));
+        
+        // Test conversion to Kraken taxonomy
+        let kraken_path = temp_dir.path().join("kraken.tax");
+        ncbi_taxonomy.convert_to_kraken_taxonomy(&kraken_path).unwrap();
+        
+        // Load the Kraken taxonomy and check it
+        let kraken_taxonomy = Taxonomy::new(&kraken_path, false).unwrap();
+        
+        // We've only marked the root node in the original NCBITaxonomyImpl, 
+        // so only that should be in the Kraken taxonomy
+        assert_eq!(kraken_taxonomy.node_count(), 2); // Node 0 + root
+    }
+}
+
 pub trait NCBITaxonomyOps {
     fn from_ncbi_dmp(nodes_file: &str, names_file: &str) -> Result<Self, anyhow::Error>
     where
