@@ -293,20 +293,12 @@ impl CompactHashTable {
 
     // Implements the same logic as the C++ second_hash function
     fn second_hash(&self, first_hash: u64) -> usize {
-        // Use the same approach as in C++
+        // Simplified version that avoids unreachable code warnings
         #[cfg(feature = "linear_probing")]
-        {
-            return 1;
-        }
-
-        #[cfg(not(feature = "linear_probing"))]
-        {
-            return ((first_hash >> 8) | 1) as usize;
-        }
-
-        // Default implementation if neither feature is enabled
-        // (matches the non-linear-probing behavior from C++)
-        return ((first_hash >> 8) | 1) as usize;
+        return 1;
+        
+        // Default behavior (non-linear probing or no feature specified)
+        ((first_hash >> 8) | 1) as usize
     }
 
     pub fn get_value_counts(&self) -> TaxonCounts {
@@ -324,6 +316,56 @@ impl CompactHashTable {
         }
 
         counts
+    }
+
+    /// Compare and set a key's value atomically.
+    /// Returns true if successful or false if a collision occurs.
+    /// Compare and set a key's value atomically.
+    /// Returns true if the value was set, false if not found or collision.
+    /// If the key is found, old_val is set to the current value.
+    pub fn compare_and_set(&self, key: u64, new_val: u64, old_val: &mut u64) -> bool {
+        let hc = murmur_hash3(key);
+        let compacted_key = hc >> (32 + self.value_bits as u64);
+        let mut idx = (hc % self.capacity as u64) as usize;
+        let first_idx = idx;
+        let mut step = 0;
+
+        // First find the key
+        loop {
+            unsafe {
+                let cell = &*self.table.add(idx);
+                let cell_value = cell.value(self.value_bits);
+                
+                if cell_value == 0 {
+                    // Key not found, return false
+                    return false;
+                } else if cell.hashed_key(self.value_bits) == compacted_key {
+                    // Key found, set old_val to current value
+                    *old_val = cell_value;
+                    
+                    // Get the hashed key from the new value
+                    let val_mask = (1 << self.value_bits) - 1;
+                    let key_mask = !val_mask;
+                    
+                    // Atomically update the cell with the new value
+                    // Keep the same key but update the value
+                    let old_data = cell.data.load(std::sync::atomic::Ordering::Relaxed);
+                    let new_data = (old_data & key_mask as u32) | ((new_val & val_mask) as u32);
+                    
+                    // Try to set the new value atomically
+                    cell.data.store(new_data, std::sync::atomic::Ordering::Relaxed);
+                    
+                    return true;
+                }
+            }
+
+            step += 1;
+            idx = (first_idx + step * step) % self.capacity;
+            if idx == first_idx {
+                // Wrapped around, key not found
+                return false;
+            }
+        }
     }
 
     pub fn find_index(&self, key: u64, idx: &mut usize) -> bool {
@@ -406,7 +448,7 @@ impl Drop for CompactHashTable {
         if !self.file_backed {
             unsafe {
                 // Deallocate the table if it's not file-backed
-                Box::from_raw(std::slice::from_raw_parts_mut(self.table, self.capacity));
+                let _ = Box::from_raw(std::slice::from_raw_parts_mut(self.table, self.capacity));
             }
         }
         // The backing_file will be dropped automatically if it exists

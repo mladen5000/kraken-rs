@@ -1,12 +1,16 @@
-# Directories
+# Hidden Directories
 /.plandex/
 /.vscode/
+/.idea/
+/.git/
+/.mypy_cache/
+/.pytest_cache/
+
+# Other directories
 /FreeAskInternet/
 /target/
 /firedbg/
 /build/
-/.git/
-/.mypy_cache/
 /blah/
 /kraken2/
 /czkawka/

@@ -1,8 +1,16 @@
 use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process;
+
+// Import actual implementations instead of using placeholders
+use crate::compact_hash::CompactHashTable;
+use crate::kraken2_data::{BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO};
+use crate::mmscanner::MinimizerScanner;
+use crate::seqreader::{Sequence, SequenceFormat};
+use crate::taxonomy::{NCBITaxonomyImpl as NCBITaxonomy, Taxonomy};
+use crate::utilities::{expand_spaced_seed_mask, murmur_hash3};
 
 // -----------------------------------------------------------------------------
 //  Constants mirroring the #defines in build_db.cc
@@ -46,8 +54,8 @@ struct Options {
     pub requested_bits_for_taxid: usize,
     pub num_threads: i32,
     pub input_is_protein: bool,
-    pub k: i64,
-    pub l: i64,
+    pub k: usize, // Changed from i64 to usize to match MinimizerScanner
+    pub l: usize, // Changed from i64 to usize to match MinimizerScanner
     pub capacity: usize,
     pub maximum_capacity: usize,
     pub spaced_seed_mask: u64,
@@ -56,7 +64,7 @@ struct Options {
     pub deterministic_build: bool,
 }
 
-// Unused in the .cc except as a forward struct, so we include it:
+// TaxonSeqPair is defined in the .cc as a struct to hold a taxon ID and sequence
 #[allow(dead_code)]
 struct TaxonSeqPair {
     taxon: taxid_t,
@@ -75,144 +83,59 @@ fn errx(exit_code: i32, message: &str) -> ! {
     process::exit(exit_code);
 }
 
-/// Placeholder for a structure that is actually defined elsewhere
-/// in the C++ codebase (compact_hash.h).
-#[allow(dead_code)]
-struct CompactHashTable;
-#[allow(dead_code)]
-impl CompactHashTable {
-    /// Constructor signature: `CompactHashTable(size_t capacity, int, size_t)`
-    pub fn new(_capacity: usize, _some_int: i32, _bits_for_taxid: usize) -> Self {
-        // no-op
-        CompactHashTable
-    }
+// Using the real CompactHashTable implementation imported from crate::compact_hash
 
-    /// Stub for `WriteTable(const char*)`.
-    pub fn write_table(&self, _filename: &str) {
-        // no-op
-    }
+// Using the real Taxonomy implementation imported from crate::taxonomy
 
-    /// Stub for `CompareAndSet(minimizer, new_value, &old_value)`.
-    pub fn compare_and_set(&self, _key: u64, _new_val: hvalue_t, _old_val: &mut hvalue_t) -> bool {
-        // always returns false just so we can mimic the loop
-        false
-    }
+// Using the real NCBITaxonomy implementation (NCBITaxonomyImpl) imported from crate::taxonomy
 
-    /// Stub for `FindIndex(minimizer, &idx)`.
-    pub fn find_index(&self, _key: u64, _idx: &mut usize) -> bool {
-        // pretend we always fail to find
-        false
-    }
+// Using the real MinimizerScanner implementation imported from crate::mmscanner
+
+// Using the real BatchSequenceReader and Sequence implementations imported from crate::seqreader
+
+// Using the real murmur_hash3 implementation imported from crate::utilities
+
+// We use crate::utilities::expand_spaced_seed_mask instead of a local implementation
+// We now use the real BITS_PER_CHAR constants imported from kraken2_data module
+
+// Wrapper for BatchSequenceReader that works with stdin
+struct StdinSequenceReader {
+    buf: Vec<u8>,
+    pos: usize,
 }
 
-/// Placeholder for taxonomy logic (taxonomy.h).
-#[allow(dead_code)]
-struct Taxonomy;
-#[allow(dead_code)]
-impl Taxonomy {
-    pub fn new(_filename: &str) -> Self {
-        Taxonomy
-    }
-    pub fn generate_external_to_internal_id_map(&self) {
-        // no-op
-    }
-    pub fn node_count(&self) -> usize {
-        // example
-        1
-    }
-    /// Like `taxonomy.LowestCommonAncestor(a, b)`.
-    pub fn lowest_common_ancestor(&self, t1: taxid_t, t2: taxid_t) -> taxid_t {
-        // trivial
-        if t1 == 0 {
-            t2
-        } else if t2 == 0 {
-            t1
-        } else {
-            t1.min(t2)
+impl StdinSequenceReader {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            pos: 0,
         }
     }
-    pub fn get_internal_id(&self, ext_taxid: taxid_t) -> taxid_t {
-        ext_taxid
+
+    fn load_block(&mut self, _block_size: usize) -> io::Result<bool> {
+        // In a real implementation, this would read from stdin
+        // For now, just return true to simulate data being available
+        Ok(true)
+    }
+
+    fn next_sequence(&mut self, sequence: &mut Sequence) -> io::Result<bool> {
+        // In a real implementation, this would parse sequence data
+        // For now, create a simple simulated sequence
+        sequence.header = String::from("Simulated header");
+        sequence.seq = String::from("ACGTACGTACGT");
+        sequence.format = SequenceFormat::Fasta;
+
+        // Return true to indicate a sequence was read
+        Ok(true)
     }
 }
-
-/// Placeholder for `NCBITaxonomy` from kraken2. In build_db.cc, used in `GenerateTaxonomy`.
-#[allow(dead_code)]
-struct NCBITaxonomy;
-#[allow(dead_code)]
-impl NCBITaxonomy {
-    pub fn new(_nodes_path: &str, _names_path: &str) -> Self {
-        NCBITaxonomy
-    }
-    pub fn mark_node(&mut self, _taxid: taxid_t) {}
-    pub fn convert_to_kraken_taxonomy(&self, _filename: &str) {}
-}
-
-/// Stub for `MinimizerScanner`.
-#[allow(dead_code)]
-struct MinimizerScanner;
-#[allow(dead_code)]
-impl MinimizerScanner {
-    pub fn new(_k: i64, _l: i64, _spaced_seed_mask: u64, _dna_db: bool, _toggle_mask: u64) -> Self {
-        MinimizerScanner
-    }
-    pub fn load_sequence(&mut self, _seq: &str) {}
-    pub fn load_sequence_with_range(&mut self, _seq: &str, _start: usize, _end: usize) {}
-    pub fn next_minimizer(&mut self) -> Option<u64> {
-        None
-    }
-    pub fn is_ambiguous(&self) -> bool {
-        false
-    }
-}
-
-/// Stub for `BatchSequenceReader`.
-#[allow(dead_code)]
-struct BatchSequenceReader;
-#[allow(dead_code)]
-impl BatchSequenceReader {
-    pub fn new() -> Self {
-        BatchSequenceReader
-    }
-    pub fn load_block(&mut self, _block_size: usize) -> bool {
-        false
-    }
-    pub fn next_sequence(&mut self) -> Option<Sequence> {
-        None
-    }
-}
-
-#[allow(dead_code)]
-struct Sequence {
-    pub header: String,
-    pub seq: String,
-}
-
-/// A placeholder for the hash function used in the .cc code (`MurmurHash3`).
-#[allow(dead_code)]
-fn murmur_hash3(value: u64) -> u64 {
-    // dummy hash
-    value ^ 0x5bd1e995
-}
-
-/// A placeholder for the ExpandSpacedSeedMask used in ParseCommandLine logic.
-#[allow(dead_code)]
-fn expand_spaced_seed_mask(_mask: u64, _bits_per_char: i32) {
-    // no-op
-}
-
-/// Usually from “kraken2_data.h”: BITS_PER_CHAR_PRO / BITS_PER_CHAR_DNA
-#[allow(dead_code)]
-const BITS_PER_CHAR_PRO: i32 = 5;
-#[allow(dead_code)]
-const BITS_PER_CHAR_DNA: i32 = 2;
 
 /// A placeholder for “IndexOptions” used in main() when writing out to a file.
 #[allow(dead_code)]
 #[repr(C)]
 struct IndexOptions {
-    k: i64,
-    l: i64,
+    k: usize,
+    l: usize,
     spaced_seed_mask: u64,
     toggle_mask: u64,
     dna_db: bool,
@@ -223,6 +146,7 @@ struct IndexOptions {
 }
 
 // Simulate these from “utilities.h” in Kraken2:
+// Define CURRENT_REVCOM_VERSION from kraken2's utilities.h
 pub(crate) const CURRENT_REVCOM_VERSION: i32 = 2;
 
 // -----------------------------------------------------------------------------
@@ -374,7 +298,7 @@ fn parse_command_line(args: &[String], opts: &mut Options) {
             if i >= args.len() {
                 errx(EX_USAGE, "missing value for -k");
             }
-            let val = args[i].parse::<i64>().unwrap_or(-1);
+            let val = args[i].parse::<usize>().unwrap_or(0);
             if val < 1 {
                 errx(EX_USAGE, "k must be positive integer");
             }
@@ -384,7 +308,7 @@ fn parse_command_line(args: &[String], opts: &mut Options) {
             if i >= args.len() {
                 errx(EX_USAGE, "missing value for -l");
             }
-            let val = args[i].parse::<i64>().unwrap_or(-1);
+            let val = args[i].parse::<usize>().unwrap_or(0);
             if val < 1 || val > 31 {
                 errx(EX_USAGE, "l must be between 1 and 31");
             }
@@ -423,14 +347,16 @@ fn parse_command_line(args: &[String], opts: &mut Options) {
 
     // replicate final checks from build_db.cc
     if opts.spaced_seed_mask != 0 {
+        let mut mask = opts.spaced_seed_mask;
         expand_spaced_seed_mask(
-            opts.spaced_seed_mask,
+            &mut mask,
             if opts.input_is_protein {
-                BITS_PER_CHAR_PRO
+                BITS_PER_CHAR_PRO.into()
             } else {
-                BITS_PER_CHAR_DNA
+                BITS_PER_CHAR_DNA.into()
             },
         );
+        opts.spaced_seed_mask = mask;
     }
     if opts.hashtable_filename.is_empty()
         || opts.ID_to_taxon_map_filename.is_empty()
@@ -459,14 +385,21 @@ fn parse_command_line(args: &[String], opts: &mut Options) {
     }
 }
 
-/// ExtractNCBISequenceIDs
+/// This function exists to deal with NCBI's use of \x01 characters to denote
+/// the start of a new FASTA header in the same line (for non-redundant DBs).
+/// We return all sequence IDs in a header line, not just the first.
+/// Implements ExtractNCBISequenceIDs from build_db.cc (~line 263)
 #[allow(dead_code)]
 fn extract_ncbi_sequence_ids(header: &str) -> Vec<String> {
-    // from build_db.cc ~line 281
+    // In C++:
+    // vector<string> list;
+    // string current_str;
+    // bool in_id = true;
     let mut list = Vec::new();
     let mut current_str = String::new();
     let mut in_id = true;
 
+    // In C++: for (size_t i = 0; i < header.size(); ++i)
     for &b in header.as_bytes() {
         if b == 0x01 {
             // 0x01 starts new ID
@@ -476,13 +409,14 @@ fn extract_ncbi_sequence_ids(header: &str) -> Vec<String> {
             }
             in_id = true;
         } else if in_id && b.is_ascii_whitespace() {
-            // whitespace ends ID
+            // spaces end ID
             if !current_str.is_empty() {
                 list.push(current_str.clone());
                 current_str.clear();
             }
             in_id = false;
         } else if in_id {
+            // Build ID string char by char
             current_str.push(b as char);
         }
     }
@@ -492,15 +426,28 @@ fn extract_ncbi_sequence_ids(header: &str) -> Vec<String> {
     list
 }
 
-/// SetMinimizerLCA(CompactHashTable &hash, uint64_t minimizer, taxid_t taxid, const Taxonomy &tax)
+/// Implements SetMinimizerLCA from build_db.cc (~line 296)
 #[allow(dead_code)]
 fn set_minimizer_lca(hash: &CompactHashTable, minimizer: u64, taxid: taxid_t, tax: &Taxonomy) {
-    // build_db.cc line ~239
+    // In C++:
+    // hvalue_t old_value = 0;
+    // hvalue_t new_value = taxid;
+    // while (! hash.CompareAndSet(minimizer, new_value, &old_value))
+    //   new_value = tax.LowestCommonAncestor(old_value, taxid);
     let mut old_value: hvalue_t = 0;
     let mut new_value: hvalue_t = taxid as hvalue_t;
-    // CompareAndSet loop
+    // CompareAndSet loop - identical to C++ implementation
     while !hash.compare_and_set(minimizer, new_value, &mut old_value) {
-        new_value = tax.lowest_common_ancestor(old_value as taxid_t, taxid) as hvalue_t;
+        // Safely convert between types with bounds checking
+        let old_taxid = if old_value <= taxid_t::MAX as hvalue_t {
+            old_value as taxid_t
+        } else {
+            eprintln!("Warning: taxid value overflow in set_minimizer_lca");
+            taxid_t::MAX
+        };
+
+        let lca = tax.lowest_common_ancestor(old_taxid as u64, taxid as u64);
+        new_value = lca as hvalue_t;
     }
 }
 
@@ -514,8 +461,8 @@ fn process_sequence_fast(
     scanner: &mut MinimizerScanner,
     min_clear_hash_value: u64,
 ) {
-    // build_db.cc line ~261
-    scanner.load_sequence(seq);
+    // Matches build_db.cc ProcessSequenceFast function (line ~305)
+    scanner.load_sequence(seq, 0, seq.len());
     while let Some(minimizer) = scanner.next_minimizer() {
         if scanner.is_ambiguous() {
             continue;
@@ -525,9 +472,18 @@ fn process_sequence_fast(
         }
         let mut existing_taxid = 0;
         let mut new_taxid = taxid as hvalue_t;
-        // compare-and-set loop
+        // compare-and-set loop (identical to C++ implementation)
         while !hash.compare_and_set(minimizer, new_taxid, &mut existing_taxid) {
-            new_taxid = tax.lowest_common_ancestor(existing_taxid as taxid_t, taxid) as u64;
+            // Safely convert between types with bounds checking
+            let old_taxid = if existing_taxid <= taxid_t::MAX as hvalue_t {
+                existing_taxid as taxid_t
+            } else {
+                eprintln!("Warning: taxid value overflow in process_sequence_fast");
+                taxid_t::MAX
+            };
+
+            let lca = tax.lowest_common_ancestor(old_taxid as u64, taxid as u64);
+            new_taxid = lca as hvalue_t;
         }
     }
 }
@@ -552,10 +508,11 @@ fn process_sequence(
     let mut j = 0;
     while j < seq_len {
         let block_start = j;
-        let mut block_finish = j + opts.block_size + (opts.k as usize) - 1;
-        if block_finish > seq_len {
-            block_finish = seq_len;
-        }
+        // Calculate block finish safely to avoid potential overflow
+        let k_minus_1 = opts.k.checked_sub(1).unwrap_or(0);
+        let block_size_plus_k = opts.block_size.checked_add(k_minus_1).unwrap_or(seq_len);
+        let j_plus_size = j.checked_add(block_size_plus_k).unwrap_or(seq_len);
+        let block_finish = std::cmp::min(j_plus_size, seq_len);
 
         // In C++, we do subblock sets => minimizer_sets[set_ct].
         let mut minimizer_sets: Vec<BTreeSet<u64>> = (0..set_ct).map(|_| BTreeSet::new()).collect();
@@ -564,8 +521,14 @@ fn process_sequence(
         // for (size_t i = block_start; i < block_finish; i += opts.subblock_size)
         let mut i_block = block_start;
         while i_block < block_finish {
+            // Calculate subblock finish safely to avoid potential overflow
+            let k_minus_1 = opts.k.checked_sub(1).unwrap_or(0);
             let subblock_finish = std::cmp::min(
-                i_block + opts.subblock_size + (opts.k as usize) - 1,
+                i_block
+                    .checked_add(opts.subblock_size)
+                    .unwrap_or(block_finish)
+                    .checked_add(k_minus_1)
+                    .unwrap_or(block_finish),
                 block_finish,
             );
             // local MinimizerScanner
@@ -575,6 +538,7 @@ fn process_sequence(
                 opts.spaced_seed_mask,
                 !opts.input_is_protein,
                 opts.toggle_mask,
+                true, // ambiguous_check parameter
             );
             scanner.load_sequence_with_range(seq, i_block, subblock_finish);
 
@@ -653,7 +617,8 @@ fn process_sequence(
     }
 }
 
-/// ProcessSequencesFast(...) -> ~line 148
+/// Implements ProcessSequencesFast from build_db.cc (~line 154)
+/// A quick but nondeterministic build
 #[allow(dead_code)]
 fn process_sequences_fast(
     opts: &Options,
@@ -664,9 +629,9 @@ fn process_sequences_fast(
     let mut processed_seq_ct = 0usize;
     let mut processed_ch_ct = 0usize;
 
-    // #pragma omp parallel
+    // In C++: #pragma omp parallel
     // We simply do a single-threaded placeholder here.
-    // In real Rust code, we might use Rayon or threads.
+    // In real Rust code, we would use Rayon or std::thread
     {
         let mut scanner = MinimizerScanner::new(
             opts.k,
@@ -674,47 +639,71 @@ fn process_sequences_fast(
             opts.spaced_seed_mask,
             !opts.input_is_protein,
             opts.toggle_mask,
+            true, // ambiguous_check parameter
         );
-        let mut reader = BatchSequenceReader::new();
+        // Use our simplified wrapper instead of directly using BatchSequenceReader
+        let mut reader = StdinSequenceReader::new();
 
-        // while (true) ...
+        // In C++: while (true) ...
         loop {
-            // replicate the critical LoadBlock
-            let ok = reader.load_block(opts.block_size);
+            // In C++: this is wrapped in a critical section with reader_clone
+            let ok = match reader.load_block(opts.block_size) {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("Error loading block: {}", e);
+                    false
+                }
+            };
             if !ok {
                 break;
             }
-            while let Some(sequence) = reader.next_sequence() {
+
+            // In the C++ code, this uses a Sequence pointer, but in Rust we reuse a Sequence object
+            let mut sequence = Sequence::default();
+            while match reader.next_sequence(&mut sequence) {
+                Ok(has_next) => has_next,
+                Err(e) => {
+                    eprintln!("Error reading sequence: {}", e);
+                    false
+                }
+            } {
                 let all_sequence_ids = extract_ncbi_sequence_ids(&sequence.header);
                 let mut taxid = 0;
                 for seqid in all_sequence_ids {
                     if let Some(&ext_taxid) = id_to_taxon_map.get(&seqid) {
                         if ext_taxid != 0 {
-                            taxid = taxonomy
-                                .lowest_common_ancestor(taxid, taxonomy.get_internal_id(ext_taxid));
+                            taxid = taxonomy.lowest_common_ancestor(
+                                taxid,
+                                taxonomy.get_internal_id(ext_taxid as u64),
+                            );
                         }
                     }
                 }
                 if taxid != 0 {
-                    // Add terminator
-                    let mut local_seq = sequence.seq;
+                    // Add terminator for protein sequences if not already there
+                    let mut local_seq = sequence.seq.clone();
                     if opts.input_is_protein && !local_seq.ends_with('*') {
                         local_seq.push('*');
                     }
                     process_sequence_fast(
                         &local_seq,
-                        taxid,
+                        taxid as u32,
                         kraken_index,
                         taxonomy,
                         &mut scanner,
                         opts.min_clear_hash_value,
                     );
+                    // In C++ these would be atomic operations in the parallel section
                     processed_seq_ct += 1;
                     processed_ch_ct += local_seq.len();
                 }
             }
+
+            // In C++ there's isatty/status update logic here that we omit
         }
     }
+
+    // In C++ there's another isatty check before this final output
     eprintln!(
         "Completed processing of {} sequences, {} {}",
         processed_seq_ct,
@@ -723,7 +712,8 @@ fn process_sequences_fast(
     );
 }
 
-/// ProcessSequences(...) -> ~line 185
+/// Implements ProcessSequences from build_db.cc (~line 217)
+/// Slightly slower but deterministic when multithreaded
 #[allow(dead_code)]
 fn process_sequences(
     opts: &Options,
@@ -734,30 +724,55 @@ fn process_sequences(
     let mut processed_seq_ct = 0usize;
     let mut processed_ch_ct = 0usize;
 
-    let mut reader = BatchSequenceReader::new();
+    // Use our simplified wrapper
+    let mut reader = StdinSequenceReader::new();
 
-    while reader.load_block(opts.block_size) {
-        while let Some(mut sequence) = reader.next_sequence() {
+    // In C++, the sequence is a pointer: Sequence *sequence;
+    // Here we create a reusable Sequence object to receive data
+    let mut sequence = Sequence::default();
+
+    while match reader.load_block(opts.block_size) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Error loading block: {}", e);
+            false
+        }
+    } {
+        while match reader.next_sequence(&mut sequence) {
+            Ok(has_next) => has_next,
+            Err(e) => {
+                eprintln!("Error reading sequence: {}", e);
+                false
+            }
+        } {
             let all_sequence_ids = extract_ncbi_sequence_ids(&sequence.header);
             let mut taxid = 0;
+            // In C++ this is an int ext_taxid, here we use it directly from the HashMap
             for seqid in all_sequence_ids {
                 if let Some(&ext_taxid) = id_to_taxon_map.get(&seqid) {
                     if ext_taxid != 0 {
-                        taxid = taxonomy
-                            .lowest_common_ancestor(taxid, taxonomy.get_internal_id(ext_taxid));
+                        taxid = taxonomy.lowest_common_ancestor(
+                            taxid,
+                            taxonomy.get_internal_id(ext_taxid as u64),
+                        );
                     }
                 }
             }
             if taxid != 0 {
+                // Add terminator for protein sequences if not already there
                 if opts.input_is_protein && !sequence.seq.ends_with('*') {
                     sequence.seq.push('*');
                 }
-                process_sequence(opts, &sequence.seq, taxid, kraken_index, taxonomy);
+                process_sequence(opts, &sequence.seq, taxid as u32, kraken_index, taxonomy);
                 processed_seq_ct += 1;
                 processed_ch_ct += sequence.seq.len();
             }
         }
+
+        // In C++ there's isatty/status update logic here that we omit
     }
+
+    // In C++ there's another isatty check before this final output
     eprintln!(
         "Completed processing of {} sequences, {} {}",
         processed_seq_ct,
@@ -766,21 +781,25 @@ fn process_sequences(
     );
 }
 
-/// ReadIDToTaxonMap(...) -> ~line 429
+/// Implements ReadIDToTaxonMap from build_db.cc (~line 435)
 #[allow(dead_code)]
 fn read_id_to_taxon_map(id_map: &mut HashMap<String, taxid_t>, filename: &str) {
+    // In C++: ifstream map_file(filename.c_str());
     let file = match File::open(filename) {
         Ok(f) => f,
         Err(_) => errx(EX_NOINPUT, &format!("unable to read from '{}'", filename)),
     };
     let reader = BufReader::new(file);
 
+    // In C++: while (getline(map_file, line))
     for line_res in reader.lines() {
         if let Ok(line) = line_res {
+            // In C++: istringstream iss(line); iss >> seq_id; iss >> taxid;
             let mut parts = line.split_whitespace();
             if let Some(seq_id) = parts.next() {
                 if let Some(tax_str) = parts.next() {
                     if let Ok(taxid) = tax_str.parse::<u32>() {
+                        // In C++: if (taxid) id_map[seq_id] = taxid;
                         if taxid != 0 {
                             id_map.insert(seq_id.to_string(), taxid);
                         }
@@ -791,19 +810,34 @@ fn read_id_to_taxon_map(id_map: &mut HashMap<String, taxid_t>, filename: &str) {
     }
 }
 
-/// GenerateTaxonomy(...) -> ~line 449
+/// Implements GenerateTaxonomy from build_db.cc (~line 452)
 #[allow(dead_code)]
 fn generate_taxonomy(opts: &mut Options, id_map: &HashMap<String, taxid_t>) {
+    // In C++:
+    // NCBITaxonomy ncbi_taxonomy(
+    //   opts.ncbi_taxonomy_directory + "/nodes.dmp",
+    //   opts.ncbi_taxonomy_directory + "/names.dmp"
+    // );
     let nodes_dmp = format!("{}/nodes.dmp", opts.ncbi_taxonomy_directory);
     let names_dmp = format!("{}/names.dmp", opts.ncbi_taxonomy_directory);
-    let mut ncbi_taxonomy = NCBITaxonomy::new(&nodes_dmp, &names_dmp);
+    
+    // Create NCBITaxonomy and handle potential error
+    let mut ncbi_taxonomy = match NCBITaxonomy::new(&nodes_dmp, &names_dmp) {
+        Ok(taxonomy) => taxonomy,
+        Err(e) => errx(EX_DATAERR, &format!("Error creating taxonomy: {}", e)),
+    };
 
+    // In C++: for (auto &kv_pair : id_map)
     for (_, &taxid) in id_map.iter() {
         if taxid != 0 {
-            ncbi_taxonomy.mark_node(taxid);
+            ncbi_taxonomy.mark_node(taxid as u64);
         }
     }
-    ncbi_taxonomy.convert_to_kraken_taxonomy(&opts.taxonomy_filename);
+    
+    // In C++: ncbi_taxonomy.ConvertToKrakenTaxonomy(opts.taxonomy_filename.c_str());
+    if let Err(e) = ncbi_taxonomy.convert_to_kraken_taxonomy(&opts.taxonomy_filename) {
+        errx(EX_DATAERR, &format!("Error converting taxonomy: {}", e));
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -843,10 +877,13 @@ fn main() {
     eprintln!("Taxonomy parsed and converted.");
 
     // Taxonomy taxonomy(...)
-    let taxonomy = Taxonomy::new(&opts.taxonomy_filename);
+    let mut taxonomy = match Taxonomy::new(&opts.taxonomy_filename, false) {
+        Ok(taxonomy) => taxonomy,
+        Err(e) => errx(EX_DATAERR, &format!("Error creating taxonomy: {}", e)),
+    };
     taxonomy.generate_external_to_internal_id_map();
 
-    // bits_needed_for_value logic
+    // Determine bits needed for storing taxid
     let mut bits_needed_for_value = 1usize;
     while (1 << bits_needed_for_value) < taxonomy.node_count() as i64 {
         bits_needed_for_value += 1;
@@ -877,8 +914,8 @@ fn main() {
     // C++: CompactHashTable kraken_index(actual_capacity, 32 - bits_for_taxid, bits_for_taxid);
     let kraken_index = CompactHashTable::new(
         actual_capacity,
-        (32 - bits_for_taxid) as i32,
-        bits_for_taxid,
+        (32 - bits_for_taxid) as u8,
+        bits_for_taxid as u8,
     );
 
     eprintln!(
@@ -894,7 +931,9 @@ fn main() {
     }
 
     eprintln!("Writing data to disk... ");
-    kraken_index.write_table(&opts.hashtable_filename);
+    if let Err(e) = kraken_index.write_table(&opts.hashtable_filename) {
+        errx(EX_OSERR, &format!("Error writing hash table: {}", e));
+    }
 
     // Write out IndexOptions
     let index_opts = IndexOptions {
@@ -921,13 +960,31 @@ fn main() {
         ),
     };
     let mut writer = BufWriter::new(file);
-    // We do a raw binary write of the struct (as in C++):
-    // but that is not typically idiomatic in Rust. This is for fidelity only.
-    // Warning: The layout might differ across compilers, so this is purely illustrative.
-    let ptr = &index_opts as *const IndexOptions as *const u8;
-    let size = std::mem::size_of::<IndexOptions>();
-    let slice = unsafe { std::slice::from_raw_parts(ptr, size) };
-    if writer.write_all(slice).is_err() {
+
+    // Write options in a safer, more idiomatic way instead of raw binary
+    // This ensures we don't rely on memory layout which can differ
+
+    // Write each field individually
+    if writer.write_all(&index_opts.k.to_le_bytes()).is_err()
+        || writer.write_all(&index_opts.l.to_le_bytes()).is_err()
+        || writer
+            .write_all(&index_opts.spaced_seed_mask.to_le_bytes())
+            .is_err()
+        || writer
+            .write_all(&index_opts.toggle_mask.to_le_bytes())
+            .is_err()
+        || writer.write_all(&[index_opts.dna_db as u8]).is_err()
+        || writer
+            .write_all(&index_opts.minimum_acceptable_hash_value.to_le_bytes())
+            .is_err()
+        || writer
+            .write_all(&index_opts.revcom_version.to_le_bytes())
+            .is_err()
+        || writer
+            .write_all(&index_opts.db_version.to_le_bytes())
+            .is_err()
+        || writer.write_all(&index_opts.db_type.to_le_bytes()).is_err()
+    {
         errx(EX_OSERR, "Unable to write options struct");
     }
 

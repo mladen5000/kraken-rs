@@ -20,6 +20,7 @@ pub struct TaxonomyNode {
     pub godparent_id: u64,
 }
 
+#[derive(Clone)]
 pub struct NCBITaxonomyImpl {
     parent_map: HashMap<u64, u64>,
     name_map: HashMap<u64, String>,
@@ -247,8 +248,8 @@ impl Taxonomy {
     }
 
     fn init_memory_mapped<P: AsRef<Path>>(filename: P) -> io::Result<Self> {
-        let taxonomy_data_file = MMapFile::open_file(filename)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let taxonomy_data_file =
+            MMapFile::open_file(filename).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let ptr = taxonomy_data_file.fptr();
 
         // Check file magic

@@ -55,6 +55,11 @@ impl MinimizerScanner {
         self.is_ambiguous = false;
         self.current_minimizer = 0;
     }
+    
+    pub fn load_sequence_with_range(&mut self, seq: &str, start: usize, end: usize) {
+        // This is an alias to load_sequence for compatibility with the build_db.rs calls
+        self.load_sequence(seq, start, end);
+    }
 
     pub fn next_minimizer(&mut self) -> Option<u64> {
         if self.pos >= self.sequence.len() {
