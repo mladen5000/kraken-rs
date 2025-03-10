@@ -5,12 +5,12 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process;
 
 // Import actual implementations instead of using placeholders
-use crate::compact_hash::CompactHashTable;
-use crate::kraken2_data::{BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO};
-use crate::mmscanner::MinimizerScanner;
-use crate::seqreader::{Sequence, SequenceFormat};
-use crate::taxonomy::{NCBITaxonomyImpl as NCBITaxonomy, Taxonomy};
-use crate::utilities::{expand_spaced_seed_mask, murmur_hash3};
+use kraken_rs::compact_hash::CompactHashTable;
+use kraken_rs::kraken2_data::{BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO};
+use kraken_rs::mmscanner::MinimizerScanner;
+use kraken_rs::seqreader::{Sequence, SequenceFormat};
+use kraken_rs::taxonomy::{NCBITaxonomyImpl as NCBITaxonomy, Taxonomy};
+use kraken_rs::utilities::{expand_spaced_seed_mask, murmur_hash3};
 
 // -----------------------------------------------------------------------------
 //  Constants mirroring the #defines in build_db.cc

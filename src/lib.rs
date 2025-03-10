@@ -1,6 +1,4 @@
 pub mod aa_translate;
-pub mod build_db;
-pub mod classify;
 pub mod compact_hash;
 pub mod dump_table;
 pub mod errors;

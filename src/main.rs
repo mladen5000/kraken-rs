@@ -1,5 +1,4 @@
-// build_db
-pub mod build_db;
+// build_db and classify are now in bin/ as separate binaries
 pub mod compact_hash;
 pub mod mmap_file;
 pub mod mmscanner;
@@ -10,7 +9,6 @@ pub mod utilities;
 
 // classify
 pub mod aa_translate;
-pub mod classify;
 pub mod hyperloglogplus;
 pub mod reports;
 

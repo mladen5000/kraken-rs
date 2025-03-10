@@ -1,3 +1,6 @@
+// Define CURRENT_REVCOM_VERSION from build_db
+pub const CURRENT_REVCOM_VERSION: i32 = 2;
+
 pub fn expand_spaced_seed_mask(mask: &mut u64, bits_per_char: i32) {
     let mut new_mask = 0u64;
     let mut pos = 0;
