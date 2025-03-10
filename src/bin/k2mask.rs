@@ -1,4 +1,4 @@
-use crate::seqreader::Sequence;
+use kraken_rs::seqreader::Sequence;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;

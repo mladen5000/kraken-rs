@@ -10,11 +10,13 @@ use std::process::exit;
 use anyhow::{Context, Result};
 use rayon::ThreadPoolBuilder;
 
-use crate::compact_hash::CompactHashTable;
-use crate::kraken2_data::{TaxonCounters, TaxonCountersMap, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO};
-use crate::reports::{report_kraken_style, report_mpa_style};
-use crate::taxonomy::Taxonomy;
-use crate::utilities::CURRENT_REVCOM_VERSION;
+use kraken_rs::compact_hash::CompactHashTable;
+use kraken_rs::kraken2_data::{
+    TaxonCounters, TaxonCountersMap, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO,
+};
+use kraken_rs::reports::{report_kraken_style, report_mpa_style};
+use kraken_rs::taxonomy::Taxonomy;
+use kraken_rs::utilities::CURRENT_REVCOM_VERSION;
 
 // Define command-line options struct to match the C++ implementation
 struct Options {

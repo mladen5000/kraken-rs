@@ -3,8 +3,8 @@ use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::mmscanner::MinimizerScanner;
-use crate::utilities::murmur_hash3;
+use kraken_rs::mmscanner::MinimizerScanner;
+use kraken_rs::utilities::murmur_hash3;
 
 const RANGE_SECTIONS: usize = 1024; // must be power of 2
 const RANGE_MASK: usize = RANGE_SECTIONS - 1;

@@ -1,15 +1,11 @@
 pub mod aa_translate;
 pub mod compact_hash;
-pub mod dump_table;
 pub mod errors;
-pub mod estimate_capacity;
 pub mod gz_stream;
 pub mod hyperloglogplus;
-pub mod k2mask;
 pub mod kraken2_data;
 pub mod kraken2_headers;
 pub mod kv_store;
-pub mod lookup_accession_numbers;
 pub mod mmap_file;
 pub mod mmscanner;
 pub mod omp_hack;
