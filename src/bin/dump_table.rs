@@ -12,7 +12,7 @@ use rayon::ThreadPoolBuilder;
 
 use kraken_rs::compact_hash::CompactHashTable;
 use kraken_rs::kraken2_data::{
-    TaxonCounters, TaxonCountersMap, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO,
+    IndexOptions, TaxonCounters, TaxonCountersMap, BITS_PER_CHAR_DNA, BITS_PER_CHAR_PRO,
 };
 use kraken_rs::reports::{report_kraken_style, report_mpa_style};
 use kraken_rs::taxonomy::Taxonomy;
@@ -173,16 +173,14 @@ pub fn main() -> Result<()> {
         .context("Failed to load taxonomy")?;
 
     // Read the index options
-    let mut idx_opts = crate::kraken2_data::IndexOptions::default();
+    let mut idx_opts = IndexOptions::default();
     let mut file = File::open(&opts.options_filename).context("Failed to open options file")?;
 
     // Read the binary option data
     unsafe {
         let idx_opts_ptr = &mut idx_opts as *mut _ as *mut u8;
-        let idx_opts_slice = std::slice::from_raw_parts_mut(
-            idx_opts_ptr,
-            std::mem::size_of::<crate::kraken2_data::IndexOptions>(),
-        );
+        let idx_opts_slice =
+            std::slice::from_raw_parts_mut(idx_opts_ptr, std::mem::size_of::<IndexOptions>());
         file.read_exact(idx_opts_slice)
             .context("Failed to read options file")?;
     }

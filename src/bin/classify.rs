@@ -1383,6 +1383,8 @@ mod tests {
     use std::io::Cursor;
     use tempfile::tempdir;
 
+    /// Tests the trim_pair_info function to ensure it correctly removes pair information
+    /// from read IDs.
     #[test]
     fn test_trim_pair_info() {
         assert_eq!(trim_pair_info("read/1"), "read");
@@ -1391,6 +1393,17 @@ mod tests {
         assert_eq!(trim_pair_info("a"), "a");
     }
 
+    /// Test resolving a tree with a simple taxonomy tree:
+    ///
+    ///       1
+    ///      / \
+    ///     2   3
+    ///    /     \
+    ///   4       5
+    ///
+    /// The test checks that the resolve_tree function correctly resolves the tree
+    /// based on the hits provided and the confidence threshold, and that the result
+    /// is correct.
     #[test]
     fn test_resolve_tree() {
         // Create a properly initialized taxonomy for testing
@@ -1489,6 +1502,12 @@ mod tests {
         assert_eq!(result, 1);
     }
 
+    /// Tests the `mask_low_quality_bases` function to ensure it correctly masks
+    /// bases with quality scores below a given threshold. Specifically, this test
+    /// initializes a sequence with known quality scores and applies a threshold
+    /// of 2, expecting the first three bases to be masked, as they fall below
+    /// the threshold.
+
     #[test]
     fn test_mask_low_quality_bases() {
         let mut seq = Sequence {
@@ -1505,6 +1524,11 @@ mod tests {
         // First three should be masked (below score 2)
         assert_eq!(seq.seq, "xxxT");
     }
+
+    /// Tests that the `OutputData` struct implements ordering correctly for use
+    /// in a `BinaryHeap`. Specifically, this test verifies that `OutputData`
+    /// instances are ordered by `block_id` in ascending order when pushed to
+    /// the heap, ensuring that the smallest `block_id` is popped first.
 
     #[test]
     fn test_output_data_priority() {
@@ -1528,6 +1552,13 @@ mod tests {
         assert_eq!(heap.pop().unwrap().block_id, 2);
     }
 
+    /// Tests the `ThreadSafeOutput` for writing and flushing data.
+    /// It verifies that the data written to the `ThreadSafeOutput`
+    /// is correctly stored in the underlying `Cursor`.
+    /// The test writes a string to the `ThreadSafeOutput`,
+    /// flushes it, and then checks that the data is present
+    /// in the underlying `Cursor`'s buffer.
+
     #[test]
     fn test_thread_safe_output() {
         let cursor = Cursor::new(Vec::new());
@@ -1546,6 +1577,12 @@ mod tests {
         assert_eq!(cursor_data.get_ref(), b"test");
     }
 
+    /// Verifies that `TaxonCounters` correctly tracks the number of distinct kmers
+    /// and the total read count.
+    ///
+    /// This test creates a new `TaxonCounters` with a precision of 10, increments
+    /// the read count, and then adds a kmer. It asserts that the read count is
+    /// correctly incremented and that the distinct kmer count is greater than 0.
     #[test]
     fn test_taxon_counters() {
         let mut counter = TaxonCounters::new_with_precision(10);
@@ -1556,6 +1593,13 @@ mod tests {
         assert!(counter.get_kmer_distinct() > 0.0);
     }
 
+    /// Verifies that `add_hitlist_string` correctly formats a hitlist string
+    /// by testing a variety of test cases.
+    ///
+    /// This test creates a simple mock taxonomy with 6 nodes and then tests
+    /// the formatting of hitlist strings with different combinations of
+    /// taxa and special nodes (mate pair and reading frame borders, and
+    /// ambiguous spans).
     #[test]
     fn test_add_hitlist_string_detailed() {
         // Setup a simple mock taxonomy for testing

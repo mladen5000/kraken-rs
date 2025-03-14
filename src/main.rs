@@ -13,19 +13,15 @@ pub mod hyperloglogplus;
 pub mod reports;
 
 //estimate_capacity
-pub mod estimate_capacity;
 
 // dump_table
-pub mod dump_table;
 
 // k2mask
-pub mod k2mask;
 pub mod kraken2_data;
 pub mod kv_store;
 pub mod threadpool;
 
 //  lookup session numbers
-pub mod lookup_accession_numbers; // corrected spelling
 pub mod readcounts;
 
 // k2mask
@@ -35,6 +31,5 @@ pub mod gz_stream;
 /// Prints "Hello, world!" to STDOUT, then runs the k2mask::run() function.
 fn main() {
     println!("Hello, world!");
-
-    k2mask::main();
+    bin::build_db::main();
 }
